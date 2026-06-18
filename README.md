@@ -4,7 +4,7 @@
 
 - a side panel for controls and live status
 - a readiness check that verifies local token provisioning before live start
-- a right-click context menu entry for starting translation from the current page
+- a right-click context menu entry for opening the side panel on the current page
 - a service worker for orchestration
 - an offscreen document for audio capture and playback
 - a real Gemini Live Translate WebSocket client
@@ -14,15 +14,23 @@
 
 This repo now includes a real Live Translate WebSocket transport and a working local token provisioning server. It is still a developer build, so you will need to run the token server locally and provide a Gemini API key through environment variables.
 
-The current Gemini Live Translate docs were last updated on `2026-06-09 UTC`, and this scaffold now matches the documented contract more closely:
+The current build matches the documented Gemini Live Translate contract more closely and is working as a local developer build:
 
 - model: `gemini-3.5-live-translate-preview`
 - input audio: raw 16-bit PCM, 16kHz, mono, little-endian
 - output audio: raw 16-bit PCM, 24kHz, mono, little-endian
 - send cadence: 100ms audio chunks
-- translation config: `targetLanguageCode` with optional `echoTargetLanguage`
-- supported languages include `uz` for Uzbek
+- translation is currently fixed to Spanish in the side panel UI
 - ephemeral tokens must use the `v1alpha` constrained WebSocket endpoint
+
+Current UI capabilities:
+
+- manual start only: nothing auto-starts
+- `Start` begins translated-only audio playback
+- `Original` and `Spanish` live text panes are collapsible
+- both text panes are stacked vertically, full width, and resizable
+- live text panes show dialogue-only transcript content
+- Spanish uses an approximate active-word highlight driven by translated audio timing
 
 ## Architecture
 
@@ -50,10 +58,10 @@ Before using the extension, make sure you have:
 1. Chrome with Developer mode available in `chrome://extensions`
 2. Node.js installed locally
 3. A Gemini API key from Google AI Studio
-4. The project dependency installed:
+4. The project dependency installed from the repo root:
 
 ```powershell
-cd C:\projects\polyglot-live
+cd <repo-root>
 npm install
 ```
 
@@ -61,11 +69,49 @@ If you already ran setup in this folder, `@google/genai` should already be prese
 
 ## Local auth setup
 
-Open PowerShell in the project folder:
+Open PowerShell in the repo root:
 
 ```powershell
-cd C:\projects\polyglot-live
+cd <repo-root>
 ```
+
+## API key safety
+
+Use your Gemini API key only on the local token server side.
+
+Safe practices for this repo:
+
+- do keep `GEMINI_API_KEY` in an environment variable
+- do keep the key out of `README.md`, source files, screenshots, and chat messages
+- do keep the key out of the Chrome side panel; the extension should talk only to your local token server
+- do keep `node_modules/` and other local-only files out of git; `.gitignore` already excludes them
+- do rotate the key in Google AI Studio if you think it was pasted somewhere unsafe
+- do use a temporary PowerShell session variable when possible
+
+Do not:
+
+- do not hard-code the key in `background.js`, `offscreen.js`, `config.js`, or any extension file
+- do not commit the key to git, even in a private repo
+- do not store the real key in Chrome extension storage
+- do not share the real key in screenshots or copied terminal history
+
+Recommended local pattern for a single PowerShell session:
+
+```powershell
+$env:GEMINI_API_KEY="your-real-gemini-api-key"
+$env:POLYGLOT_LIVE_SHARED_SECRET="optional-local-secret"
+node .\server\token-server.mjs
+```
+
+That keeps the key in the current shell session only. Closing that shell drops the value.
+
+If you want a persistent Windows environment variable, use `setx`, but treat that as less private because it stays on the machine after the shell closes:
+
+```powershell
+setx GEMINI_API_KEY "your-real-gemini-api-key"
+```
+
+After using `setx`, open a new PowerShell window before starting the token server.
 
 Then set your environment variables before starting the token server:
 
@@ -78,7 +124,7 @@ node .\server\token-server.mjs
 If you want a fast local test, you can skip the shared secret and run:
 
 ```powershell
-cd C:\projects\polyglot-live
+cd <repo-root>
 $env:GEMINI_API_KEY="your-real-gemini-api-key"
 node .\server\token-server.mjs
 ```
@@ -97,7 +143,7 @@ polyglot-live readiness probe available at http://127.0.0.1:8787/status
 1. Open `chrome://extensions`.
 2. Enable Developer mode.
 3. Click Load unpacked.
-4. Select `C:\projects\polyglot-live`.
+4. Select this repo checkout folder.
 5. Open the side panel.
 6. Leave the token endpoint as `http://127.0.0.1:8787/token` unless you changed the server host or port.
 7. If you set `POLYGLOT_LIVE_SHARED_SECRET`, enter that exact same value in the side panel's shared secret field.
@@ -121,24 +167,31 @@ The readiness check verifies the same token path that the offscreen Live session
 
 ## Start translation
 
-You now have two ways to launch translation on a page with embedded audio:
+Current launch flow:
 
-1. Open the side panel and click `Start`.
-2. Right-click the page, audio element, or video element and choose `Translate this tab audio`.
+1. Start the local token server
+2. Reload the unpacked extension if needed
+3. Open a tab that is playing audio
+4. Use the right-click menu to open `polyglot-live for this tab`, or open the side panel directly
+5. Click `Check readiness`
+6. Press `Start`
 
-The right-click flow uses the target language and pass-through audio preference currently saved in the side panel.
+Important current behavior:
+
+- the side panel does not auto-start translation
+- the right-click menu opens the side panel but does not start translation
+- the side panel currently targets Spanish only
+- the extension currently plays translated audio only
+- `Stop` shuts down the current offscreen Gemini session before restart
 
 Recommended flow:
 
 1. Start the local token server
 2. Reload the unpacked extension
-3. Open the side panel
-4. Click `Check readiness`
-5. Press `Start` only after the panel reports readiness
-
-## Current working location
-
-Use `C:\projects\polyglot-live` as the active project folder going forward. The original copy in `C:\Users\Jim\Documents\polyglot-live` may still exist from the initial scaffold, but the intended working copy is the one in `C:\projects\polyglot-live`.
+3. Start the source audio
+4. Open the side panel
+5. Click `Check readiness`
+6. Press `Start` only after the panel reports readiness
 
 ## Debugging
 
@@ -154,6 +207,7 @@ Current background logs include messages such as:
 - `[polyglot-live/background] rebuilding context menu`
 - `[polyglot-live/background] preparing translation session`
 - `[polyglot-live/background] tab capture stream acquired`
+- `[polyglot-live/background] stop requested`
 
 Current offscreen logs include messages such as:
 
@@ -161,11 +215,12 @@ Current offscreen logs include messages such as:
 - `[polyglot-live/offscreen] ephemeral token accepted`
 - `[polyglot-live/offscreen] websocket open`
 - `[polyglot-live/offscreen] setup complete`
+- translated audio packet receipts and active session close messages
 
 ## Next build steps
 
-1. Harden transcript rendering so it accumulates conversation history instead of replacing the current line.
-2. Add richer reconnect and session-resumption handling around `goAway` and websocket churn.
-3. Move the shared-secret check to a stronger user auth scheme if this leaves local-only development.
-4. Add packaging, logging controls, and extension options UX.
-5. Add a clearer in-panel indicator for live WebSocket connected vs. token ready.
+1. Replace `ScriptProcessorNode` with `AudioWorkletNode`.
+2. Improve approximate translated-word timing so the highlight tracks speech more naturally.
+3. Add richer reconnect and session-resumption handling around `goAway` and websocket churn.
+4. Move the shared-secret check to a stronger user auth scheme if this leaves local-only development.
+5. Add packaging, logging controls, and extension options UX.
