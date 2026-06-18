@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>polyglot-live</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="hero">
+        <p class="eyebrow">Real-time tab audio</p>
+        <h1>polyglot-live</h1>
+        <p class="lede">Play the tab audio first, then press Start here to begin translation. Nothing auto-starts.</p>
+      </header>
+
+      <section class="card">
+        <label class="field">
+          <span>Target language</span>
+          <input id="targetLanguage" type="text" value="Spanish (fixed)" readonly>
+        </label>
+
+        <div class="actions">
+          <button id="startButton" type="button">Start</button>
+          <button id="stopButton" type="button" class="secondary">Stop</button>
+        </div>
+      </section>
+
+      <section class="card transcript-shell">
+        <div class="status-head">
+          <h2>Live Text</h2>
+          <span class="muted">collapsible panes</span>
+        </div>
+        <div class="transcript-grid">
+          <details class="transcript-accordion" open>
+            <summary class="pane-head">
+              <h3>Original</h3>
+              <span class="muted">input</span>
+            </summary>
+            <section class="transcript-pane transcript-pane-resizable">
+              <pre id="originalTranscriptOutput">Original transcript will appear here as speech is detected.</pre>
+            </section>
+          </details>
+
+          <details class="transcript-accordion" open>
+            <summary class="pane-head">
+              <h3>Spanish</h3>
+              <span class="muted">translated</span>
+            </summary>
+            <section class="transcript-pane transcript-pane-resizable">
+              <div id="translatedTranscriptOutput" class="translated-transcript-empty">
+                Spanish translation will appear here as Gemini returns audio/text events.
+              </div>
+            </section>
+          </details>
+        </div>
+      </section>
+
+      <details class="accordion card" open>
+        <summary class="accordion-summary">
+          <span>Status</span>
+          <span id="phaseBadge" class="badge">idle</span>
+        </summary>
+        <div class="accordion-body">
+          <p id="statusMessage">Manual start only. Play tab audio first, then press Start in the side panel.</p>
+          <p class="hint">Live Translate expects 16-bit PCM input at 16kHz mono and returns 24kHz mono audio.</p>
+        </div>
+      </details>
+
+      <details class="accordion card">
+        <summary class="accordion-summary">
+          <span>Auth</span>
+          <span class="muted">ephemeral token</span>
+        </summary>
+        <div class="accordion-body">
+          <label class="field">
+            <span>Token endpoint</span>
+            <input id="tokenEndpoint" type="url" placeholder="http://127.0.0.1:8787/token">
+          </label>
+          <label class="field">
+            <span>Shared secret (optional)</span>
+            <input id="tokenSecret" type="password" placeholder="Optional local dev secret">
+          </label>
+          <div class="auth-actions">
+            <button id="checkAuthButton" type="button">Check readiness</button>
+          </div>
+          <p id="authMessage" class="hint">Run the local token server, then click Check readiness.</p>
+        </div>
+      </details>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

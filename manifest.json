@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "polyglot-live",
+  "version": "0.1.0",
+  "description": "Real-time tab audio translation scaffold with a side panel and offscreen audio pipeline.",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "offscreen",
+    "sidePanel",
+    "storage",
+    "tabCapture",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "wss://generativelanguage.googleapis.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "polyglot-live"
+  },
+  "icons": {},
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "offscreen.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}
