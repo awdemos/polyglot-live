@@ -64,13 +64,18 @@ async function startPipeline({ streamId, targetLanguage, passThroughOriginalAudi
 
   audioContext = new AudioContext({ sampleRate: 48000 });
   emitDebug("Audio context created", { sampleRate: audioContext.sampleRate });
+  await audioContext.audioWorklet.addModule("offscreen-audio-processor.js");
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
-  processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+  processorNode = new AudioWorkletNode(audioContext, "polyglot-live-capture-processor", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1]
+  });
   passThroughGain = audioContext.createGain();
   passThroughGain.gain.value = passThroughOriginalAudio ? 1 : 0;
   emitDebug("Audio nodes wired", {
     passThroughGain: passThroughGain.gain.value,
-    processorBufferSize: processorNode.bufferSize
+    processorType: "AudioWorkletNode"
   });
 
   sourceNode.connect(passThroughGain);
@@ -78,8 +83,8 @@ async function startPipeline({ streamId, targetLanguage, passThroughOriginalAudi
 
   sourceNode.connect(processorNode);
   processorNode.connect(audioContext.destination);
-  processorNode.onaudioprocess = (event) => {
-    const channelData = event.inputBuffer.getChannelData(0);
+  processorNode.port.onmessage = (event) => {
+    const channelData = event.data;
     const pcm16 = float32ToPcm16(downsampleBuffer(channelData, audioContext.sampleRate, INPUT_SAMPLE_RATE));
     enqueuePcm16(pcm16);
   };
@@ -91,7 +96,7 @@ async function stopPipeline() {
   console.info("[polyglot-live/offscreen] stop pipeline");
   if (processorNode) {
     processorNode.disconnect();
-    processorNode.onaudioprocess = null;
+    processorNode.port.onmessage = null;
     processorNode = null;
   }
 
