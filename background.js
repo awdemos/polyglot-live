@@ -1,4 +1,4 @@
-import { DEFAULT_TOKEN_ENDPOINT } from "./config.js";
+import { DEFAULT_TARGET_LANGUAGE_CODE, DEFAULT_TOKEN_ENDPOINT } from "./config.js";
 
 const OFFSCREEN_PATH = "offscreen.html";
 const CONTEXT_MENU_ID = "translate-tab-audio";
@@ -107,7 +107,7 @@ async function getTranslationPreferences() {
   const { translationPrefs = {} } = await chrome.storage.local.get("translationPrefs");
   return {
     passThroughOriginalAudio: Boolean(translationPrefs.passThroughOriginalAudio),
-    targetLanguage: translationPrefs.targetLanguage || "en"
+    targetLanguage: translationPrefs.targetLanguage || DEFAULT_TARGET_LANGUAGE_CODE
   };
 }
 

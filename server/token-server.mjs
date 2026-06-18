@@ -1,6 +1,6 @@
 import http from "node:http";
 import { GoogleGenAI } from "@google/genai";
-import { GEMINI_MODEL } from "../config.js";
+import { DEFAULT_TARGET_LANGUAGE_CODE, GEMINI_MODEL, SUPPORTED_TRANSLATION_LANGUAGES } from "../config.js";
 
 const host = process.env.POLYGLOT_LIVE_HOST || "127.0.0.1";
 const port = Number(process.env.POLYGLOT_LIVE_PORT || 8787);
@@ -9,6 +9,7 @@ const sharedSecret = process.env.POLYGLOT_LIVE_SHARED_SECRET || "";
 const genai = new GoogleGenAI({
   apiKey: geminiApiKey
 });
+const supportedLanguageCodes = new Set(SUPPORTED_TRANSLATION_LANGUAGES.map((language) => language.code));
 
 if (!geminiApiKey) {
   console.error("GEMINI_API_KEY is required.");
@@ -32,7 +33,8 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const probe = await requestToken({ targetLanguage: "fr" });
+      const probeBody = await readJsonBody(request).catch(() => ({}));
+      const probe = await requestToken({ targetLanguage: probeBody?.targetLanguage });
       response.writeHead(200, { "content-type": "application/json" });
       response.end(
         JSON.stringify({
@@ -110,7 +112,10 @@ function readJsonBody(request) {
   });
 }
 
-async function requestToken({ targetLanguage = "en" } = {}) {
+async function requestToken({ targetLanguage = DEFAULT_TARGET_LANGUAGE_CODE } = {}) {
+  const normalizedTargetLanguage = supportedLanguageCodes.has(targetLanguage)
+    ? targetLanguage
+    : DEFAULT_TARGET_LANGUAGE_CODE;
   const now = Date.now();
   const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
   const newSessionExpireTime = new Date(now + 60 * 1000).toISOString();
@@ -127,7 +132,7 @@ async function requestToken({ targetLanguage = "en" } = {}) {
             inputAudioTranscription: {},
             outputAudioTranscription: {},
             translationConfig: {
-              targetLanguageCode: targetLanguage,
+              targetLanguageCode: normalizedTargetLanguage,
               echoTargetLanguage: true
             }
           }
@@ -139,7 +144,7 @@ async function requestToken({ targetLanguage = "en" } = {}) {
       }
     });
 
-    console.log(`polyglot-live token provisioning succeeded via @google/genai (${targetLanguage})`);
+    console.log(`polyglot-live token provisioning succeeded via @google/genai (${normalizedTargetLanguage})`);
     return token;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

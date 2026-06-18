@@ -91,13 +91,15 @@ h1 {
 }
 
 input,
+select,
 button {
   width: 100%;
   border-radius: 12px;
   font: inherit;
 }
 
-input {
+input,
+select {
   padding: 10px 12px;
   border: 1px solid var(--line);
   background: #fff;

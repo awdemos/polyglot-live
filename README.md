@@ -20,17 +20,20 @@ The current build matches the documented Gemini Live Translate contract more clo
 - input audio: raw 16-bit PCM, 16kHz, mono, little-endian
 - output audio: raw 16-bit PCM, 24kHz, mono, little-endian
 - send cadence: 100ms audio chunks
-- translation is currently fixed to Spanish in the side panel UI
+- translation target is selectable in the side panel and persists across sessions
 - ephemeral tokens must use the `v1alpha` constrained WebSocket endpoint
 
 Current UI capabilities:
 
 - manual start only: nothing auto-starts
 - `Start` begins translated-only audio playback
-- `Original` and `Spanish` live text panes are collapsible
+- target language is selected from a sticky dropdown and restored on reload
+- the dropdown is populated from the current Gemini Live Translate supported-language list
+- `Original` and translated live text panes are collapsible
 - both text panes are stacked vertically, full width, and resizable
 - live text panes show dialogue-only transcript content
-- Spanish uses an approximate active-word highlight driven by translated audio timing
+- translated text uses an approximate active-word highlight driven by translated audio timing
+- translated voice rendering should be treated as best-effort, especially for multi-speaker audio
 
 ## Architecture
 
@@ -167,20 +170,11 @@ The readiness check verifies the same token path that the offscreen Live session
 
 ## Start translation
 
-Current launch flow:
-
-1. Start the local token server
-2. Reload the unpacked extension if needed
-3. Open a tab that is playing audio
-4. Use the right-click menu to open `polyglot-live for this tab`, or open the side panel directly
-5. Click `Check readiness`
-6. Press `Start`
-
 Important current behavior:
 
 - the side panel does not auto-start translation
 - the right-click menu opens the side panel but does not start translation
-- the side panel currently targets Spanish only
+- the side panel remembers the last selected target language
 - the extension currently plays translated audio only
 - `Stop` shuts down the current offscreen Gemini session before restart
 
@@ -192,6 +186,20 @@ Recommended flow:
 4. Open the side panel
 5. Click `Check readiness`
 6. Press `Start` only after the panel reports readiness
+
+The token server validates the selected language against the shared supported-language list before provisioning the ephemeral token.
+
+## Voice behavior limits
+
+Gemini Live Translate currently handles translated voices on a best-effort basis.
+
+Important current limits from the Google documentation:
+
+- voice replication can shift after long pauses
+- the model can assign the wrong gender based on how speech begins
+- rapid multi-speaker conversations can collapse onto a single translated voice
+
+So while a male/female two-speaker source may sometimes sound distinct in the translated output, this should not be treated as a guaranteed feature of the current Live Translate pipeline.
 
 ## Debugging
 
@@ -219,8 +227,8 @@ Current offscreen logs include messages such as:
 
 ## Next build steps
 
-1. Replace `ScriptProcessorNode` with `AudioWorkletNode`.
-2. Improve approximate translated-word timing so the highlight tracks speech more naturally.
-3. Add richer reconnect and session-resumption handling around `goAway` and websocket churn.
+1. Improve approximate translated-word timing so the highlight tracks speech more naturally.
+2. Add richer reconnect and session-resumption handling around `goAway` and websocket churn.
+3. Consider a searchable language picker now that the dropdown includes the full supported list.
 4. Move the shared-secret check to a stronger user auth scheme if this leaves local-only development.
 5. Add packaging, logging controls, and extension options UX.

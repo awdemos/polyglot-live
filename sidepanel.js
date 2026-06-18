@@ -1,11 +1,14 @@
-import { DEFAULT_TOKEN_ENDPOINT } from "./config.js";
-
-const FIXED_TARGET_LANGUAGE = "es";
+import {
+  DEFAULT_TARGET_LANGUAGE_CODE,
+  DEFAULT_TOKEN_ENDPOINT,
+  SUPPORTED_TRANSLATION_LANGUAGES
+} from "./config.js";
 const targetLanguageInput = document.querySelector("#targetLanguage");
 const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
 const statusMessage = document.querySelector("#statusMessage");
 const phaseBadge = document.querySelector("#phaseBadge");
+const translatedPaneTitle = document.querySelector("#translatedPaneTitle");
 const originalTranscriptOutput = document.querySelector("#originalTranscriptOutput");
 const translatedTranscriptOutput = document.querySelector("#translatedTranscriptOutput");
 const tokenEndpointInput = document.querySelector("#tokenEndpoint");
@@ -16,6 +19,7 @@ let sessionPollId = null;
 let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
 let activeHighlightTimeoutId = null;
+let lastStartedTargetLanguage = null;
 
 initialize().catch((error) => {
   updateStatus("error", error.message);
@@ -26,6 +30,16 @@ checkAuthButton.addEventListener("click", async () => {
 });
 
 startButton.addEventListener("click", async () => {
+  const selectedTargetLanguage = getSelectedTargetLanguageCode();
+  const shouldResetForFreshStart =
+    phaseBadge.textContent === "idle" ||
+    lastStartedTargetLanguage === null ||
+    lastStartedTargetLanguage !== selectedTargetLanguage;
+
+  if (shouldResetForFreshStart) {
+    resetTranscriptOutputs();
+  }
+
   setBusy(true);
   updateStatus("starting", "Starting translation session...");
   await persistAuthConfig();
@@ -41,7 +55,7 @@ startButton.addEventListener("click", async () => {
   const response = await chrome.runtime.sendMessage({
     type: "START_TRANSLATION",
     passThroughOriginalAudio: false,
-    targetLanguage: FIXED_TARGET_LANGUAGE
+    targetLanguage: selectedTargetLanguage
   });
 
   setBusy(false);
@@ -57,6 +71,7 @@ startButton.addEventListener("click", async () => {
     return;
   }
 
+  lastStartedTargetLanguage = selectedTargetLanguage;
   updateStatus("running", `Session started on tab ${response.tabId}.`);
 });
 
@@ -70,6 +85,8 @@ stopButton.addEventListener("click", async () => {
     return;
   }
 
+  lastStartedTargetLanguage = null;
+  resetTranscriptOutputs();
   updateStatus("idle", "Translation stopped.");
 });
 
@@ -99,6 +116,9 @@ function setBusy(isBusy) {
 function updateStatus(phase, message) {
   phaseBadge.textContent = phase;
   statusMessage.textContent = message;
+  if (phase === "idle") {
+    lastStartedTargetLanguage = null;
+  }
   syncButtonsForPhase(phase);
   syncPollingForPhase(phase);
 }
@@ -110,7 +130,9 @@ async function initialize() {
   ]);
   tokenEndpointInput.value = authConfig.tokenEndpoint || DEFAULT_TOKEN_ENDPOINT;
   tokenSecretInput.value = authConfig.tokenSecret || "";
-  targetLanguageInput.value = "Spanish (fixed)";
+  renderTargetLanguageOptions();
+  targetLanguageInput.value = normalizeTargetLanguageCode(translationPrefs.targetLanguage);
+  updateTargetLanguagePresentation(targetLanguageInput.value);
 
   tokenEndpointInput.addEventListener("change", () => {
     void persistAuthConfig();
@@ -118,6 +140,12 @@ async function initialize() {
 
   tokenSecretInput.addEventListener("change", () => {
     void persistAuthConfig();
+  });
+
+  targetLanguageInput.addEventListener("change", () => {
+    updateTargetLanguagePresentation(getSelectedTargetLanguageCode());
+    resetTranscriptOutputs();
+    void persistTranslationPrefs();
   });
 
   updateAuthMessage("Not checked yet.");
@@ -135,10 +163,11 @@ async function persistAuthConfig() {
 }
 
 async function persistTranslationPrefs() {
+  const targetLanguage = getSelectedTargetLanguageCode();
   await chrome.storage.local.set({
     translationPrefs: {
       passThroughOriginalAudio: false,
-      targetLanguage: FIXED_TARGET_LANGUAGE
+      targetLanguage
     }
   });
 }
@@ -154,7 +183,7 @@ async function runReadinessCheck({ suppressSuccessStatus = false } = {}) {
       headers: buildProbeHeaders(),
       body: JSON.stringify({
         model: "gemini-3.5-live-translate-preview",
-        targetLanguage: FIXED_TARGET_LANGUAGE
+        targetLanguage: getSelectedTargetLanguageCode()
       })
     });
 
@@ -202,8 +231,7 @@ function updateAuthMessage(message) {
 
 function resetTranscriptOutputs() {
   originalTranscriptOutput.textContent = "Original transcript will appear here as speech is detected.";
-  translatedTranscriptOutput.textContent =
-    "Spanish translation will appear here as Gemini returns audio/text events.";
+  translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
   translatedTranscriptOutput.className = "translated-transcript-empty";
   translatedSegments = [];
   pendingTranslatedAudioMs = 0;
@@ -396,10 +424,7 @@ function normalizeTranscriptText(text, kind) {
 }
 
 function isPlaceholderText(text) {
-  return (
-    text === "Original transcript will appear here as speech is detected." ||
-    text === "Spanish translation will appear here as Gemini returns audio/text events."
-  );
+  return text === "Original transcript will appear here as speech is detected.";
 }
 
 function getLastTranscriptLine(text) {
@@ -413,6 +438,42 @@ function getLastTranscriptLine(text) {
     .filter(Boolean);
 
   return lines.length > 0 ? lines[lines.length - 1] : "";
+}
+
+function renderTargetLanguageOptions() {
+  const optionsMarkup = SUPPORTED_TRANSLATION_LANGUAGES.map(
+    ({ code, label }) => `<option value="${code}">${label}</option>`
+  ).join("");
+  targetLanguageInput.innerHTML = optionsMarkup;
+}
+
+function normalizeTargetLanguageCode(code) {
+  return SUPPORTED_TRANSLATION_LANGUAGES.some((language) => language.code === code)
+    ? code
+    : DEFAULT_TARGET_LANGUAGE_CODE;
+}
+
+function getSelectedTargetLanguageCode() {
+  return normalizeTargetLanguageCode(targetLanguageInput.value);
+}
+
+function getSelectedTargetLanguageLabel() {
+  return (
+    SUPPORTED_TRANSLATION_LANGUAGES.find((language) => language.code === getSelectedTargetLanguageCode())
+      ?.label ||
+    "Translated"
+  );
+}
+
+function updateTargetLanguagePresentation(targetLanguageCode) {
+  const normalizedCode = normalizeTargetLanguageCode(targetLanguageCode);
+  const label =
+    SUPPORTED_TRANSLATION_LANGUAGES.find((language) => language.code === normalizedCode)?.label ||
+    "Translated";
+  translatedPaneTitle.textContent = label;
+  if (translatedTranscriptOutput.classList.contains("translated-transcript-empty")) {
+    translatedTranscriptOutput.textContent = `${label} translation will appear here as Gemini returns audio/text events.`;
+  }
 }
 
 async function syncSessionState() {
