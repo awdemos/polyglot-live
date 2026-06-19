@@ -24,6 +24,7 @@ const tokenSecretInput = document.querySelector("#tokenSecret");
 const checkAuthButton = document.querySelector("#checkAuthButton");
 const authMessage = document.querySelector("#authMessage");
 const themeToggleButton = document.querySelector("#themeToggleButton");
+const originalPlaceholder = "Original transcript will appear here as speech is detected.";
 let sessionPollId = null;
 let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
@@ -31,6 +32,7 @@ let activeHighlightTimeoutId = null;
 let lastStartedTargetLanguage = null;
 let replayHasSavedCapture = false;
 let replayIsRecording = false;
+let currentTabId = null;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 
@@ -52,7 +54,11 @@ saveTranscriptButton.addEventListener("click", () => {
   exportTranscripts();
 });
 
-clearTranscriptButton.addEventListener("click", () => {
+clearTranscriptButton.addEventListener("click", async () => {
+  if (currentTabId) {
+    await chrome.runtime.sendMessage({ type: "CLEAR_TRANSCRIPTS", tabId: currentTabId });
+  }
+
   resetTranscriptOutputs();
 
   if (phaseBadge.textContent === "running") {
@@ -69,7 +75,12 @@ clearTranscriptButton.addEventListener("click", () => {
 });
 
 startRecordingButton.addEventListener("click", async () => {
-  const response = await chrome.runtime.sendMessage({ type: "START_REPLAY_RECORDING" });
+  if (!currentTabId) {
+    updateRecordingMessage("Choose a source tab before starting replay recording.");
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "START_REPLAY_RECORDING", tabId: currentTabId });
   if (!response?.ok) {
     updateRecordingMessage(response?.error ?? "Unable to start replay recording.");
     await syncReplayRecordingState();
@@ -83,7 +94,12 @@ startRecordingButton.addEventListener("click", async () => {
 });
 
 stopRecordingButton.addEventListener("click", async () => {
-  const response = await chrome.runtime.sendMessage({ type: "STOP_REPLAY_RECORDING" });
+  if (!currentTabId) {
+    updateRecordingMessage("Choose a source tab before stopping replay recording.");
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "STOP_REPLAY_RECORDING", tabId: currentTabId });
   if (!response?.ok) {
     updateRecordingMessage(response?.error ?? "Unable to stop replay recording.");
     await syncReplayRecordingState();
@@ -101,7 +117,12 @@ stopRecordingButton.addEventListener("click", async () => {
 });
 
 saveReplayButton.addEventListener("click", async () => {
-  const response = await chrome.runtime.sendMessage({ type: "EXPORT_REPLAY_RECORDING" });
+  if (!currentTabId) {
+    updateRecordingMessage("Choose a source tab before saving replay audio.");
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "EXPORT_REPLAY_RECORDING", tabId: currentTabId });
   if (!response?.ok) {
     updateRecordingMessage(response?.error ?? "Unable to save replay.");
     await syncReplayRecordingState();
@@ -125,6 +146,11 @@ saveReplayButton.addEventListener("click", async () => {
 });
 
 startButton.addEventListener("click", async () => {
+  if (!currentTabId) {
+    updateStatus("error", "No active browser tab is available for translation.");
+    return;
+  }
+
   const selectedTargetLanguage = getSelectedTargetLanguageCode();
   const shouldResetForFreshStart =
     phaseBadge.textContent === "idle" ||
@@ -150,6 +176,7 @@ startButton.addEventListener("click", async () => {
   const response = await chrome.runtime.sendMessage({
     type: "START_TRANSLATION",
     passThroughOriginalAudio: false,
+    tabId: currentTabId,
     targetLanguage: selectedTargetLanguage
   });
 
@@ -171,8 +198,13 @@ startButton.addEventListener("click", async () => {
 });
 
 stopButton.addEventListener("click", async () => {
+  if (!currentTabId) {
+    updateStatus("error", "No active browser tab is available for translation.");
+    return;
+  }
+
   setBusy(true);
-  const response = await chrome.runtime.sendMessage({ type: "STOP_TRANSLATION" });
+  const response = await chrome.runtime.sendMessage({ type: "STOP_TRANSLATION", tabId: currentTabId });
   setBusy(false);
 
   if (!response?.ok) {
@@ -186,7 +218,7 @@ stopButton.addEventListener("click", async () => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type !== "SESSION_EVENT") {
+  if (message?.type !== "SESSION_EVENT" || message.tabId !== currentTabId) {
     return;
   }
 
@@ -200,6 +232,10 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message.event === "audio_timing") {
     applyTranslatedAudioTiming(message.payload);
+  }
+
+  if (message.event === "transcripts_cleared") {
+    resetTranscriptOutputs();
   }
 });
 
@@ -248,8 +284,16 @@ async function initialize() {
   updateAuthMessage("Not checked yet.");
   updateRecordingMessage("Replay recording captures translated audio as WebM for later playback.");
   resetTranscriptOutputs();
-  await syncReplayRecordingState();
-  await syncSessionState();
+  chrome.tabs.onActivated.addListener(() => {
+    void refreshActiveTabContext();
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (tabId === currentTabId && changeInfo.status === "complete") {
+      void refreshActiveTabContext();
+    }
+  });
+
+  await refreshActiveTabContext();
 }
 
 async function persistAuthConfig() {
@@ -282,6 +326,7 @@ async function runReadinessCheck({ suppressSuccessStatus = false } = {}) {
       headers: buildProbeHeaders(),
       body: JSON.stringify({
         model: "gemini-3.5-live-translate-preview",
+        tabId: currentTabId,
         targetLanguage: getSelectedTargetLanguageCode()
       })
     });
@@ -383,7 +428,7 @@ function exportTranscripts() {
 }
 
 function resetTranscriptOutputs() {
-  originalTranscriptOutput.textContent = "Original transcript will appear here as speech is detected.";
+  originalTranscriptOutput.textContent = originalPlaceholder;
   translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
   translatedTranscriptOutput.className = "translated-transcript-empty";
   translatedSegments = [];
@@ -618,7 +663,7 @@ function normalizeTranscriptText(text, kind) {
 }
 
 function isPlaceholderText(text) {
-  return text === "Original transcript will appear here as speech is detected.";
+  return text === originalPlaceholder;
 }
 
 function getLastTranscriptLine(text) {
@@ -729,16 +774,36 @@ function updateTargetLanguagePresentation(targetLanguageCode) {
 }
 
 async function syncSessionState() {
-  const response = await chrome.runtime.sendMessage({ type: "GET_SESSION_STATE" });
+  if (!currentTabId) {
+    updateStatus("idle", "No active browser tab is available for translation.");
+    resetTranscriptOutputs();
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "GET_SESSION_STATE", tabId: currentTabId });
   if (!response?.ok) {
     return;
   }
 
+  if (response.targetLanguage) {
+    targetLanguageInput.value = normalizeTargetLanguageCode(response.targetLanguage);
+    updateTargetLanguagePresentation(targetLanguageInput.value);
+  }
+
+  applyTranscriptSnapshot(response.transcripts);
   updateStatus(response.phase || "idle", response.statusMessage || "Ready to start a translation session.");
 }
 
 async function syncReplayRecordingState() {
-  const response = await chrome.runtime.sendMessage({ type: "GET_REPLAY_RECORDING_STATE" });
+  if (!currentTabId) {
+    replayIsRecording = false;
+    replayHasSavedCapture = false;
+    updateRecordingIndicator();
+    syncRecordingButtonsForState();
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "GET_REPLAY_RECORDING_STATE", tabId: currentTabId });
   if (!response?.ok) {
     replayIsRecording = false;
     replayHasSavedCapture = false;
@@ -776,6 +841,54 @@ function syncRecordingButtonsForState() {
   stopRecordingButton.disabled = !replayIsRecording;
   saveReplayButton.disabled = replayIsRecording || !replayHasSavedCapture;
   updateRecordingIndicator();
+}
+
+async function refreshActiveTabContext() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const nextTabId = tab?.id || null;
+
+  if (nextTabId === currentTabId) {
+    await syncSessionState();
+    await syncReplayRecordingState();
+    return;
+  }
+
+  currentTabId = nextTabId;
+  lastStartedTargetLanguage = null;
+  resetTranscriptOutputs();
+
+  if (!currentTabId) {
+    updateStatus("idle", "No active browser tab is available for translation.");
+    replayIsRecording = false;
+    replayHasSavedCapture = false;
+    syncRecordingButtonsForState();
+    return;
+  }
+
+  await syncSessionState();
+  await syncReplayRecordingState();
+}
+
+function applyTranscriptSnapshot(transcripts = {}) {
+  const originalText = normalizeWhitespace(transcripts.input || "");
+  const translatedText = normalizeWhitespace(transcripts.output || "");
+  translatedSegments = [];
+  pendingTranslatedAudioMs = 0;
+  if (activeHighlightTimeoutId) {
+    clearTimeout(activeHighlightTimeoutId);
+    activeHighlightTimeoutId = null;
+  }
+
+  originalTranscriptOutput.textContent = originalText || originalPlaceholder;
+
+  if (translatedText) {
+    translatedTranscriptOutput.textContent = translatedText;
+    translatedTranscriptOutput.className = "";
+    translatedTranscriptOutput.scrollTop = translatedTranscriptOutput.scrollHeight;
+  } else {
+    translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
+    translatedTranscriptOutput.className = "translated-transcript-empty";
+  }
 }
 
 function syncPollingForPhase(phase) {

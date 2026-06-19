@@ -2,13 +2,10 @@ import { DEFAULT_TARGET_LANGUAGE_CODE, DEFAULT_TOKEN_ENDPOINT } from "./config.j
 
 const OFFSCREEN_PATH = "offscreen.html";
 const CONTEXT_MENU_ID = "translate-tab-audio";
-const state = {
-  activeSession: null,
-  isStarting: false,
-  isStopping: false,
-  phase: "idle",
-  statusMessage: "Manual start only. Play tab audio first, then press Start in the side panel."
-};
+const DEFAULT_STATUS_MESSAGE = "Manual start only. Play tab audio first, then press Start in the side panel.";
+const sessions = new Map();
+const startingTabs = new Set();
+const stoppingTabs = new Set();
 
 chrome.runtime.onInstalled.addListener(async () => {
   console.info("[polyglot-live/background] installed");
@@ -19,6 +16,12 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(() => {
   console.info("[polyglot-live/background] startup");
   void createContextMenu();
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void stopTranslation(tabId, { suppressStatusBroadcast: true }).finally(() => {
+    sessions.delete(tabId);
+  });
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -37,74 +40,91 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "START_TRANSLATION") {
-    startTranslation(message)
+    startTranslation(message, sender)
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === "STOP_TRANSLATION") {
-    stopTranslation()
+    stopTranslation(message.tabId)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
+  if (message.type === "CLEAR_TRANSCRIPTS") {
+    clearSessionTranscripts(resolveTabIdFromMessage(message, sender));
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.type === "START_REPLAY_RECORDING") {
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_START" })
-      .then((payload) => sendResponse(payload))
+    const tabId = resolveTabIdFromMessage(message, sender);
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_START", tabId })
+      .then((payload) => {
+        updateReplayState(tabId, payload);
+        sendResponse(payload);
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === "STOP_REPLAY_RECORDING") {
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STOP" })
-      .then((payload) => sendResponse(payload))
+    const tabId = resolveTabIdFromMessage(message, sender);
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STOP", tabId })
+      .then((payload) => {
+        updateReplayState(tabId, payload);
+        sendResponse(payload);
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === "EXPORT_REPLAY_RECORDING") {
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT" })
-      .then((payload) => sendResponse(payload))
+    const tabId = resolveTabIdFromMessage(message, sender);
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId })
+      .then((payload) => {
+        updateReplayState(tabId, { ...payload, hasReplay: true, isRecording: false });
+        sendResponse(payload);
+      })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === "GET_REPLAY_RECORDING_STATE") {
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE" })
-      .then((payload) => sendResponse(payload))
-      .catch((error) => sendResponse({ ok: true, hasReplay: false, isRecording: false }));
+    const tabId = resolveTabIdFromMessage(message, sender);
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE", tabId })
+      .then((payload) => {
+        updateReplayState(tabId, payload);
+        sendResponse(payload);
+      })
+      .catch(() => sendResponse({ ok: true, hasReplay: false, isRecording: false }));
     return true;
   }
 
   if (message.type === "GET_SESSION_STATE") {
+    const tabId = resolveTabIdFromMessage(message, sender);
     sendResponse({
       ok: true,
-      activeSession: state.activeSession,
-      isStarting: state.isStarting,
-      isStopping: state.isStopping,
-      phase: state.phase,
-      statusMessage: state.statusMessage
+      ...buildSessionSnapshot(getSession(tabId))
     });
     return false;
   }
 
   if (message.type === "SESSION_EVENT") {
-    if (message.event === "status" && message.payload) {
-      state.phase = message.payload.phase || state.phase;
-      state.statusMessage = message.payload.message || state.statusMessage;
-    }
-    if (message.event === "translated_audio_started") {
-      void resumePausedTabMedia();
-    }
-    broadcastToViews(message);
+    handleSessionEvent(message);
     sendResponse({ ok: true });
     return false;
   }
 
   if (message.type === "SESSION_DEBUG") {
-    console.info("[polyglot-live/offscreen->background]", message.payload?.message, message.payload?.details || "");
+    console.info(
+      "[polyglot-live/offscreen->background]",
+      message.payload?.message,
+      message.payload?.details || "",
+      message.tabId ? { tabId: message.tabId } : ""
+    );
     sendResponse({ ok: true });
     return false;
   }
@@ -112,17 +132,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startTranslation({ targetLanguage, passThroughOriginalAudio = false }) {
-  console.info("[polyglot-live/background] start requested", { targetLanguage, passThroughOriginalAudio });
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!tab?.id) {
-    throw new Error("No active tab is available for capture.");
-  }
-
-  return startTranslationFromTab(tab.id, {
-    passThroughOriginalAudio,
-    targetLanguage
+async function startTranslation(message, sender) {
+  console.info("[polyglot-live/background] start requested", {
+    targetLanguage: message.targetLanguage,
+    passThroughOriginalAudio: message.passThroughOriginalAudio,
+    tabId: message.tabId
+  });
+  const tabId = await resolveTabIdForStart(message, sender);
+  return startTranslationFromTab(tabId, {
+    passThroughOriginalAudio: message.passThroughOriginalAudio,
+    targetLanguage: message.targetLanguage
   });
 }
 
@@ -143,25 +162,34 @@ async function getTranslationPreferences() {
 }
 
 async function startTranslationFromTab(tabId, requestedOptions = null) {
-  if (state.isStarting) {
-    throw new Error("A translation session is already starting. Please wait a moment.");
-  }
-  if (state.isStopping) {
-    throw new Error("A translation session is stopping. Please wait a moment.");
+  if (!tabId) {
+    throw new Error("No active tab is available for capture.");
   }
 
-  state.isStarting = true;
+  if (startingTabs.has(tabId)) {
+    throw new Error("A translation session is already starting on this tab. Please wait a moment.");
+  }
+
+  if (stoppingTabs.has(tabId)) {
+    throw new Error("A translation session is stopping on this tab. Please wait a moment.");
+  }
+
+  startingTabs.add(tabId);
   console.info("[polyglot-live/background] preparing translation session", { requestedOptions, tabId });
+
   try {
     const translationPrefs = requestedOptions || (await getTranslationPreferences());
-    updateSessionState("starting", `Starting translation for ${translationPrefs.targetLanguage}...`);
+    const sessionState = getSession(tabId);
+    resetSessionTranscripts(sessionState);
+    updateSessionState(tabId, "starting", `Starting translation for ${translationPrefs.targetLanguage}...`);
 
-    if (state.activeSession) {
+    if (sessionState.activeSession) {
       console.info("[polyglot-live/background] restarting existing session", {
-        previousTabId: state.activeSession.tabId,
-        previousTargetLanguage: state.activeSession.targetLanguage
+        tabId,
+        previousTargetLanguage: sessionState.targetLanguage
       });
-      await stopTranslation();
+      await stopTranslation(tabId, { suppressStatusBroadcast: true });
+      updateSessionState(tabId, "starting", `Restarting translation for ${translationPrefs.targetLanguage}...`);
     }
 
     await ensureOffscreenDocument();
@@ -173,25 +201,25 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
       targetLanguage: translationPrefs.targetLanguage
     });
 
-    state.activeSession = {
-      authConfig,
-      awaitingTranslatedAudioStart: false,
-      didPauseSourceMedia: false,
-      startedAt: Date.now(),
-      tabId,
-      targetLanguage: translationPrefs.targetLanguage
-    };
+    sessionState.activeSession = true;
+    sessionState.authConfig = authConfig;
+    sessionState.awaitingTranslatedAudioStart = false;
+    sessionState.didPauseSourceMedia = false;
+    sessionState.startedAt = Date.now();
+    sessionState.tabId = tabId;
+    sessionState.targetLanguage = translationPrefs.targetLanguage;
 
     const pauseResult = await pauseTabMedia(tabId);
-    state.activeSession.didPauseSourceMedia = pauseResult.didPausePlayback;
-    state.activeSession.awaitingTranslatedAudioStart = pauseResult.didPausePlayback;
-    console.info("[polyglot-live/background] source media pause result", pauseResult);
+    sessionState.didPauseSourceMedia = pauseResult.didPausePlayback;
+    sessionState.awaitingTranslatedAudioStart = pauseResult.didPausePlayback;
+    console.info("[polyglot-live/background] source media pause result", { tabId, ...pauseResult });
 
     const offscreenResponse = await chrome.runtime.sendMessage({
       type: "OFFSCREEN_START",
       payload: {
         passThroughOriginalAudio: translationPrefs.passThroughOriginalAudio,
         streamId,
+        tabId,
         tokenEndpoint: authConfig.tokenEndpoint,
         tokenSecret: authConfig.tokenSecret,
         targetLanguage: translationPrefs.targetLanguage
@@ -199,65 +227,55 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     });
 
     if (!offscreenResponse?.ok) {
-      if (state.activeSession?.didPauseSourceMedia) {
-        await resumePausedTabMedia();
+      if (sessionState.didPauseSourceMedia) {
+        await resumePausedTabMedia(tabId);
       }
-      state.activeSession = null;
+      clearSessionRuntime(sessionState);
       console.error("[polyglot-live/background] offscreen start failed", offscreenResponse);
       throw new Error(offscreenResponse?.error || "Offscreen pipeline failed to start.");
     }
 
-    broadcastToViews({
-      type: "SESSION_EVENT",
-      event: "status",
-      payload: {
-        message: `Capturing tab audio for ${translationPrefs.targetLanguage}.`,
-        phase: "starting"
-      }
-    });
-    updateSessionState("starting", `Capturing tab audio for ${translationPrefs.targetLanguage}.`);
-
+    updateSessionState(tabId, "starting", `Capturing tab audio for ${translationPrefs.targetLanguage}.`);
     return { tabId };
   } catch (error) {
-    updateSessionState("error", error.message);
+    updateSessionState(tabId, "error", error.message);
     throw error;
   } finally {
-    state.isStarting = false;
+    startingTabs.delete(tabId);
   }
 }
 
-async function stopTranslation() {
-  console.info("[polyglot-live/background] stop requested");
-  if (state.isStopping) {
-    updateSessionState("stopping", "Translation is already stopping...");
+async function stopTranslation(tabId, { suppressStatusBroadcast = false } = {}) {
+  if (!tabId) {
     return;
   }
 
-  state.isStopping = true;
-  updateSessionState("stopping", "Stopping translation...");
+  const sessionState = getSession(tabId);
+  console.info("[polyglot-live/background] stop requested", { tabId });
+
+  if (stoppingTabs.has(tabId)) {
+    updateSessionState(tabId, "stopping", "Translation is already stopping...");
+    return;
+  }
+
+  stoppingTabs.add(tabId);
+  updateSessionState(tabId, "stopping", "Stopping translation...");
 
   await ensureOffscreenDocument();
   try {
-    await chrome.runtime.sendMessage({ type: "OFFSCREEN_STOP" }).catch((error) => {
-      console.warn("[polyglot-live/background] offscreen stop failed", error);
+    await chrome.runtime.sendMessage({ type: "OFFSCREEN_STOP", tabId }).catch((error) => {
+      console.warn("[polyglot-live/background] offscreen stop failed", { tabId, error });
       return { ok: false };
     });
   } finally {
-    await resumePausedTabMedia();
-    state.activeSession = null;
-    state.isStopping = false;
+    await resumePausedTabMedia(tabId);
+    clearSessionRuntime(sessionState);
+    stoppingTabs.delete(tabId);
   }
 
-  broadcastToViews({
-    type: "SESSION_EVENT",
-    event: "status",
-    payload: {
-      message: "Translation stopped.",
-      phase: "idle"
-    }
-  });
-
-  updateSessionState("idle", "Translation stopped.");
+  if (!suppressStatusBroadcast) {
+    updateSessionState(tabId, "idle", "Translation stopped.");
+  }
 }
 
 async function ensureOffscreenDocument() {
@@ -285,11 +303,13 @@ function broadcastToViews(message) {
   });
 }
 
-function updateSessionState(phase, message) {
-  state.phase = phase;
-  state.statusMessage = message;
+function updateSessionState(tabId, phase, message) {
+  const sessionState = getSession(tabId);
+  sessionState.phase = phase;
+  sessionState.statusMessage = message;
   broadcastToViews({
     type: "SESSION_EVENT",
+    tabId,
     event: "status",
     payload: {
       phase,
@@ -328,7 +348,7 @@ async function pauseTabMedia(tabId) {
       scannedCount
     };
   } catch (error) {
-    console.warn("[polyglot-live/background] unable to pause source media", error);
+    console.warn("[polyglot-live/background] unable to pause source media", { tabId, error });
     return {
       didPausePlayback: false,
       pausedCount: 0,
@@ -337,12 +357,16 @@ async function pauseTabMedia(tabId) {
   }
 }
 
-async function resumePausedTabMedia() {
-  if (!state.activeSession?.tabId || !state.activeSession?.didPauseSourceMedia) {
+async function resumePausedTabMedia(tabId) {
+  const sessionState = getSession(tabId);
+  if (!sessionState.activeSession && !sessionState.didPauseSourceMedia) {
     return;
   }
 
-  const tabId = state.activeSession.tabId;
+  if (!sessionState.didPauseSourceMedia) {
+    return;
+  }
+
   try {
     const results = await chrome.scripting.executeScript({
       target: { allFrames: true, tabId },
@@ -351,12 +375,10 @@ async function resumePausedTabMedia() {
     const resumedCount = results.reduce((sum, frame) => sum + Number(frame.result?.resumedCount || 0), 0);
     console.info("[polyglot-live/background] source media resume result", { resumedCount, tabId });
   } catch (error) {
-    console.warn("[polyglot-live/background] unable to resume source media", error);
+    console.warn("[polyglot-live/background] unable to resume source media", { tabId, error });
   } finally {
-    if (state.activeSession) {
-      state.activeSession.awaitingTranslatedAudioStart = false;
-      state.activeSession.didPauseSourceMedia = false;
-    }
+    sessionState.awaitingTranslatedAudioStart = false;
+    sessionState.didPauseSourceMedia = false;
   }
 }
 
@@ -401,4 +423,189 @@ function resumeMediaElementsForPolyglot() {
   return {
     resumedCount
   };
+}
+
+function resolveTabIdFromMessage(message, sender) {
+  return message?.tabId || sender?.tab?.id || null;
+}
+
+async function resolveTabIdForStart(message, sender) {
+  const explicitTabId = resolveTabIdFromMessage(message, sender);
+  if (explicitTabId) {
+    return explicitTabId;
+  }
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab?.id || null;
+}
+
+function getSession(tabId) {
+  if (!sessions.has(tabId)) {
+    sessions.set(tabId, createSessionState(tabId));
+  }
+  return sessions.get(tabId);
+}
+
+function createSessionState(tabId) {
+  return {
+    activeSession: false,
+    authConfig: null,
+    awaitingTranslatedAudioStart: false,
+    didPauseSourceMedia: false,
+    phase: "idle",
+    replay: {
+      hasReplay: false,
+      isRecording: false
+    },
+    startedAt: null,
+    statusMessage: DEFAULT_STATUS_MESSAGE,
+    tabId,
+    targetLanguage: DEFAULT_TARGET_LANGUAGE_CODE,
+    transcripts: {
+      input: "",
+      output: ""
+    }
+  };
+}
+
+function clearSessionRuntime(sessionState) {
+  sessionState.activeSession = false;
+  sessionState.awaitingTranslatedAudioStart = false;
+  sessionState.didPauseSourceMedia = false;
+  sessionState.startedAt = null;
+  sessionState.replay = {
+    hasReplay: false,
+    isRecording: false
+  };
+}
+
+function resetSessionTranscripts(sessionState) {
+  sessionState.transcripts.input = "";
+  sessionState.transcripts.output = "";
+}
+
+function clearSessionTranscripts(tabId) {
+  if (!tabId) {
+    return;
+  }
+
+  const sessionState = getSession(tabId);
+  resetSessionTranscripts(sessionState);
+  broadcastToViews({
+    type: "SESSION_EVENT",
+    tabId,
+    event: "transcripts_cleared",
+    payload: {}
+  });
+}
+
+function buildSessionSnapshot(sessionState) {
+  return {
+    activeSession: sessionState.activeSession,
+    isStarting: startingTabs.has(sessionState.tabId),
+    isStopping: stoppingTabs.has(sessionState.tabId),
+    phase: sessionState.phase,
+    replay: { ...sessionState.replay },
+    statusMessage: sessionState.statusMessage,
+    tabId: sessionState.tabId,
+    targetLanguage: sessionState.targetLanguage,
+    transcripts: { ...sessionState.transcripts }
+  };
+}
+
+function handleSessionEvent(message) {
+  const tabId = message.tabId;
+  if (!tabId) {
+    return;
+  }
+
+  const sessionState = getSession(tabId);
+  if (message.event === "status" && message.payload) {
+    sessionState.phase = message.payload.phase || sessionState.phase;
+    sessionState.statusMessage = message.payload.message || sessionState.statusMessage;
+  }
+
+  if (message.event === "transcript" && message.payload) {
+    const transcriptKind = message.payload.kind === "input" ? "input" : message.payload.kind === "output" ? "output" : null;
+    if (transcriptKind) {
+      const normalizedText = normalizeTranscriptText(message.payload.text || "", transcriptKind);
+      if (normalizedText) {
+        sessionState.transcripts[transcriptKind] = mergeTranscriptText(
+          sessionState.transcripts[transcriptKind],
+          normalizedText
+        );
+      }
+    }
+  }
+
+  if (message.event === "translated_audio_started") {
+    void resumePausedTabMedia(tabId);
+  }
+
+  broadcastToViews(message);
+}
+
+function updateReplayState(tabId, payload) {
+  if (!tabId) {
+    return;
+  }
+
+  const sessionState = getSession(tabId);
+  sessionState.replay = {
+    hasReplay: Boolean(payload?.hasReplay),
+    isRecording: Boolean(payload?.isRecording)
+  };
+}
+
+function normalizeTranscriptText(text, kind) {
+  if (kind === "input" && text.startsWith("Input:")) {
+    return text.slice("Input:".length).trim();
+  }
+
+  if (kind === "output" && text.startsWith("Output:")) {
+    return text.slice("Output:".length).trim();
+  }
+
+  return text.trim();
+}
+
+function mergeTranscriptText(existingText, incomingText) {
+  const normalizedExisting = normalizeWhitespace(existingText);
+  const normalizedIncoming = normalizeWhitespace(incomingText);
+
+  if (!normalizedExisting) {
+    return normalizedIncoming;
+  }
+
+  if (!normalizedIncoming || normalizedExisting === normalizedIncoming) {
+    return normalizedExisting;
+  }
+
+  if (normalizedExisting.endsWith(normalizedIncoming)) {
+    return normalizedExisting;
+  }
+
+  if (normalizedIncoming.startsWith(normalizedExisting)) {
+    return normalizedIncoming;
+  }
+
+  const existingWords = normalizedExisting.split(" ");
+  const incomingWords = normalizedIncoming.split(" ");
+  const maxOverlap = Math.min(existingWords.length, incomingWords.length);
+
+  for (let overlapLength = maxOverlap; overlapLength > 0; overlapLength -= 1) {
+    const existingTail = existingWords.slice(-overlapLength).join(" ");
+    const incomingHead = incomingWords.slice(0, overlapLength).join(" ");
+    if (existingTail === incomingHead) {
+      return `${normalizedExisting} ${incomingWords.slice(overlapLength).join(" ")}`.trim();
+    }
+  }
+
+  return `${normalizedExisting} ${normalizedIncoming}`.trim();
+}
+
+function normalizeWhitespace(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }

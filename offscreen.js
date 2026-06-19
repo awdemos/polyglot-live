@@ -7,19 +7,7 @@ import {
   OUTPUT_SAMPLE_RATE
 } from "./config.js";
 
-let audioContext = null;
-let mediaStream = null;
-let sourceNode = null;
-let processorNode = null;
-let passThroughGain = null;
-let replayCaptureDestination = null;
-let replayRecorder = null;
-let replayRecorderChunks = [];
-let replayRecordingBlob = null;
-let replayRecordingMimeType = "";
-let session = null;
-let pendingPcm16 = new Int16Array(0);
-let playbackCursorTime = 0;
+const pipelines = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "OFFSCREEN_START") {
@@ -30,222 +18,376 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "OFFSCREEN_STOP") {
-    stopPipeline()
+    stopPipeline(message.tabId)
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "OFFSCREEN_RECORD_START") {
-    startReplayRecording()
+    getPipelineOrThrow(message.tabId)
+      .startReplayRecording()
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "OFFSCREEN_RECORD_STOP") {
-    stopReplayRecording()
+    getPipelineOrThrow(message.tabId)
+      .stopReplayRecording()
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "OFFSCREEN_RECORD_EXPORT") {
-    exportReplayRecording()
+    getPipelineOrThrow(message.tabId)
+      .exportReplayRecording()
       .then((payload) => sendResponse({ ok: true, ...payload }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "OFFSCREEN_RECORD_STATE") {
-    sendResponse({
-      ok: true,
-      hasReplay: Boolean(replayRecordingBlob),
-      isRecording: replayRecorder?.state === "recording",
-      mimeType: replayRecordingMimeType || null
-    });
+    const pipeline = pipelines.get(message.tabId);
+    sendResponse(
+      pipeline
+        ? pipeline.getReplayRecordingState()
+        : {
+            ok: true,
+            hasReplay: false,
+            isRecording: false,
+            mimeType: null
+          }
+    );
     return false;
   }
 
   return false;
 });
 
-async function startPipeline({ streamId, targetLanguage, passThroughOriginalAudio, tokenEndpoint, tokenSecret }) {
-  console.info("[polyglot-live/offscreen] start pipeline", { streamId, targetLanguage, tokenEndpoint });
-  emitDebug("Starting offscreen pipeline", {
+async function startPipeline({ streamId, tabId, targetLanguage, passThroughOriginalAudio, tokenEndpoint, tokenSecret }) {
+  if (!tabId) {
+    throw new Error("A tab id is required to start the offscreen pipeline.");
+  }
+
+  emitDebug(tabId, "Starting offscreen pipeline", {
     passThroughOriginalAudio,
     streamId,
     targetLanguage,
     tokenEndpoint
   });
-  emitStatus("starting", "Initializing offscreen audio pipeline...");
-  await stopPipeline();
+  emitStatus(tabId, "starting", "Initializing offscreen audio pipeline...");
 
-  session = new GeminiTranslateSession({ targetLanguage, tokenEndpoint, tokenSecret });
-  await session.connect();
+  if (pipelines.has(tabId)) {
+    await pipelines.get(tabId).stop();
+  }
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: "tab",
-        chromeMediaSourceId: streamId
+  const pipeline = new TabAudioPipeline({
+    passThroughOriginalAudio,
+    streamId,
+    tabId,
+    targetLanguage,
+    tokenEndpoint,
+    tokenSecret
+  });
+  pipelines.set(tabId, pipeline);
+
+  try {
+    await pipeline.start();
+  } catch (error) {
+    await pipeline.stop().catch(() => {
+      return undefined;
+    });
+    pipelines.delete(tabId);
+    throw error;
+  }
+}
+
+async function stopPipeline(tabId) {
+  if (!tabId) {
+    return;
+  }
+
+  const pipeline = pipelines.get(tabId);
+  if (!pipeline) {
+    return;
+  }
+
+  await pipeline.stop();
+  pipelines.delete(tabId);
+}
+
+function getPipelineOrThrow(tabId) {
+  const pipeline = pipelines.get(tabId);
+  if (!pipeline) {
+    throw new Error("Start translation before using replay recording on this tab.");
+  }
+  return pipeline;
+}
+
+class TabAudioPipeline {
+  constructor({ passThroughOriginalAudio, streamId, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
+    this.passThroughOriginalAudio = passThroughOriginalAudio;
+    this.streamId = streamId;
+    this.tabId = tabId;
+    this.targetLanguage = targetLanguage;
+    this.tokenEndpoint = tokenEndpoint;
+    this.tokenSecret = tokenSecret;
+    this.audioContext = null;
+    this.mediaStream = null;
+    this.sourceNode = null;
+    this.processorNode = null;
+    this.passThroughGain = null;
+    this.replayCaptureDestination = null;
+    this.replayRecorder = null;
+    this.replayRecorderChunks = [];
+    this.replayRecordingBlob = null;
+    this.replayRecordingMimeType = "";
+    this.pendingPcm16 = new Int16Array(0);
+    this.playbackCursorTime = 0;
+    this.session = null;
+  }
+
+  async start() {
+    this.session = new GeminiTranslateSession({
+      onTranslatedAudio: (base64Audio) => this.playTranslatedAudio(base64Audio),
+      tabId: this.tabId,
+      targetLanguage: this.targetLanguage,
+      tokenEndpoint: this.tokenEndpoint,
+      tokenSecret: this.tokenSecret
+    });
+    await this.session.connect();
+
+    this.mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: this.streamId
+        }
+      },
+      video: false
+    });
+    emitDebug(this.tabId, "Tab media stream acquired", {
+      audioTrackCount: this.mediaStream.getAudioTracks().length,
+      targetLanguage: this.targetLanguage
+    });
+
+    this.audioContext = new AudioContext({ sampleRate: 48000 });
+    emitDebug(this.tabId, "Audio context created", { sampleRate: this.audioContext.sampleRate });
+    await this.audioContext.audioWorklet.addModule("offscreen-audio-processor.js");
+    this.replayCaptureDestination = this.audioContext.createMediaStreamDestination();
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+    this.processorNode = new AudioWorkletNode(this.audioContext, "polyglot-live-capture-processor", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1]
+    });
+    this.passThroughGain = this.audioContext.createGain();
+    this.passThroughGain.gain.value = this.passThroughOriginalAudio ? 1 : 0;
+    emitDebug(this.tabId, "Audio nodes wired", {
+      passThroughGain: this.passThroughGain.gain.value,
+      processorType: "AudioWorkletNode"
+    });
+
+    this.sourceNode.connect(this.passThroughGain);
+    this.passThroughGain.connect(this.audioContext.destination);
+
+    this.sourceNode.connect(this.processorNode);
+    this.processorNode.connect(this.audioContext.destination);
+    this.processorNode.port.onmessage = (event) => {
+      const channelData = event.data;
+      const pcm16 = float32ToPcm16(downsampleBuffer(channelData, this.audioContext.sampleRate, INPUT_SAMPLE_RATE));
+      this.enqueuePcm16(pcm16);
+    };
+
+    emitStatus(this.tabId, "streaming", `Streaming tab audio to Gemini for ${this.targetLanguage}. Waiting for translated audio...`);
+  }
+
+  async stop() {
+    if (this.processorNode) {
+      this.processorNode.disconnect();
+      this.processorNode.port.onmessage = null;
+      this.processorNode = null;
+    }
+
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+      this.sourceNode = null;
+    }
+
+    if (this.passThroughGain) {
+      this.passThroughGain.disconnect();
+      this.passThroughGain = null;
+    }
+
+    if (this.mediaStream) {
+      for (const track of this.mediaStream.getTracks()) {
+        track.stop();
       }
-    },
-    video: false
-  });
-  emitDebug("Tab media stream acquired", {
-    audioTrackCount: mediaStream.getAudioTracks().length,
-    targetLanguage
-  });
-
-  audioContext = new AudioContext({ sampleRate: 48000 });
-  emitDebug("Audio context created", { sampleRate: audioContext.sampleRate });
-  await audioContext.audioWorklet.addModule("offscreen-audio-processor.js");
-  replayCaptureDestination = audioContext.createMediaStreamDestination();
-  sourceNode = audioContext.createMediaStreamSource(mediaStream);
-  processorNode = new AudioWorkletNode(audioContext, "polyglot-live-capture-processor", {
-    numberOfInputs: 1,
-    numberOfOutputs: 1,
-    outputChannelCount: [1]
-  });
-  passThroughGain = audioContext.createGain();
-  passThroughGain.gain.value = passThroughOriginalAudio ? 1 : 0;
-  emitDebug("Audio nodes wired", {
-    passThroughGain: passThroughGain.gain.value,
-    processorType: "AudioWorkletNode"
-  });
-
-  sourceNode.connect(passThroughGain);
-  passThroughGain.connect(audioContext.destination);
-
-  sourceNode.connect(processorNode);
-  processorNode.connect(audioContext.destination);
-  processorNode.port.onmessage = (event) => {
-    const channelData = event.data;
-    const pcm16 = float32ToPcm16(downsampleBuffer(channelData, audioContext.sampleRate, INPUT_SAMPLE_RATE));
-    enqueuePcm16(pcm16);
-  };
-
-  emitStatus("streaming", `Streaming tab audio to Gemini for ${targetLanguage}. Waiting for translated audio...`);
-}
-
-async function stopPipeline() {
-  console.info("[polyglot-live/offscreen] stop pipeline");
-  if (processorNode) {
-    processorNode.disconnect();
-    processorNode.port.onmessage = null;
-    processorNode = null;
-  }
-
-  if (sourceNode) {
-    sourceNode.disconnect();
-    sourceNode = null;
-  }
-
-  if (passThroughGain) {
-    passThroughGain.disconnect();
-    passThroughGain = null;
-  }
-
-  if (mediaStream) {
-    for (const track of mediaStream.getTracks()) {
-      track.stop();
-    }
-    mediaStream = null;
-  }
-
-  if (audioContext) {
-    await audioContext.close();
-    audioContext = null;
-  }
-
-  if (session) {
-    await session.close();
-    session = null;
-  }
-
-  if (replayRecorder?.state === "recording") {
-    await stopReplayRecording();
-  }
-
-  replayRecorder = null;
-  replayRecorderChunks = [];
-  replayRecordingBlob = null;
-  replayRecordingMimeType = "";
-  replayCaptureDestination = null;
-
-  pendingPcm16 = new Int16Array(0);
-  playbackCursorTime = 0;
-}
-
-function emitStatus(phase, message) {
-  chrome.runtime.sendMessage({
-    type: "SESSION_EVENT",
-    event: "status",
-    payload: { phase, message }
-  });
-}
-
-function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
-  if (outputSampleRate >= inputSampleRate) {
-    return buffer;
-  }
-
-  const sampleRateRatio = inputSampleRate / outputSampleRate;
-  const newLength = Math.round(buffer.length / sampleRateRatio);
-  const result = new Float32Array(newLength);
-
-  let offsetResult = 0;
-  let offsetBuffer = 0;
-
-  while (offsetResult < result.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-    let accum = 0;
-    let count = 0;
-
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i += 1) {
-      accum += buffer[i];
-      count += 1;
+      this.mediaStream = null;
     }
 
-    result[offsetResult] = count > 0 ? accum / count : 0;
-    offsetResult += 1;
-    offsetBuffer = nextOffsetBuffer;
+    if (this.audioContext) {
+      await this.audioContext.close();
+      this.audioContext = null;
+    }
+
+    if (this.session) {
+      await this.session.close();
+      this.session = null;
+    }
+
+    if (this.replayRecorder?.state === "recording") {
+      await this.stopReplayRecording();
+    }
+
+    this.replayRecorder = null;
+    this.replayRecorderChunks = [];
+    this.replayRecordingBlob = null;
+    this.replayRecordingMimeType = "";
+    this.replayCaptureDestination = null;
+    this.pendingPcm16 = new Int16Array(0);
+    this.playbackCursorTime = 0;
   }
 
-  return result;
-}
+  enqueuePcm16(chunk) {
+    this.pendingPcm16 = concatInt16Arrays(this.pendingPcm16, chunk);
 
-function float32ToPcm16(float32Buffer) {
-  const output = new Int16Array(float32Buffer.length);
-
-  for (let i = 0; i < float32Buffer.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32Buffer[i]));
-    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    while (this.pendingPcm16.length >= INPUT_SAMPLES_PER_CHUNK) {
+      const nextChunk = this.pendingPcm16.slice(0, INPUT_SAMPLES_PER_CHUNK);
+      this.pendingPcm16 = this.pendingPcm16.slice(INPUT_SAMPLES_PER_CHUNK);
+      this.session.sendAudioChunk(nextChunk);
+    }
   }
 
-  return output;
-}
+  playTranslatedAudio(base64Audio) {
+    if (!this.audioContext) {
+      return;
+    }
 
-function enqueuePcm16(chunk) {
-  pendingPcm16 = concatInt16Arrays(pendingPcm16, chunk);
+    const pcm16 = base64ToInt16Array(base64Audio);
+    const audioBuffer = this.audioContext.createBuffer(1, pcm16.length, OUTPUT_SAMPLE_RATE);
+    const channelData = audioBuffer.getChannelData(0);
 
-  while (pendingPcm16.length >= INPUT_SAMPLES_PER_CHUNK) {
-    const nextChunk = pendingPcm16.slice(0, INPUT_SAMPLES_PER_CHUNK);
-    pendingPcm16 = pendingPcm16.slice(INPUT_SAMPLES_PER_CHUNK);
-    session.sendAudioChunk(nextChunk);
+    for (let i = 0; i < pcm16.length; i += 1) {
+      channelData[i] = pcm16[i] / 0x8000;
+    }
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.audioContext.destination);
+    if (this.replayCaptureDestination) {
+      source.connect(this.replayCaptureDestination);
+    }
+
+    const startTime = Math.max(this.audioContext.currentTime + 0.02, this.playbackCursorTime);
+    source.start(startTime);
+    this.playbackCursorTime = startTime + audioBuffer.duration;
   }
-}
 
-function concatInt16Arrays(left, right) {
-  const result = new Int16Array(left.length + right.length);
-  result.set(left, 0);
-  result.set(right, left.length);
-  return result;
+  async startReplayRecording() {
+    if (!this.audioContext || !this.replayCaptureDestination) {
+      throw new Error("Start translation before starting a replay recording.");
+    }
+
+    if (this.replayRecorder?.state === "recording") {
+      throw new Error("Replay recording is already in progress.");
+    }
+
+    this.replayRecordingMimeType = pickReplayRecordingMimeType();
+    if (!this.replayRecordingMimeType) {
+      throw new Error("This browser does not support WebM audio recording.");
+    }
+
+    this.replayRecordingBlob = null;
+    this.replayRecorderChunks = [];
+    this.replayRecorder = new MediaRecorder(this.replayCaptureDestination.stream, {
+      mimeType: this.replayRecordingMimeType
+    });
+    this.replayRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        this.replayRecorderChunks.push(event.data);
+      }
+    };
+    this.replayRecorder.start(1000);
+    emitDebug(this.tabId, "Replay recording started", { mimeType: this.replayRecordingMimeType });
+    return {
+      hasReplay: false,
+      isRecording: true,
+      mimeType: this.replayRecordingMimeType
+    };
+  }
+
+  async stopReplayRecording() {
+    if (!this.replayRecorder || this.replayRecorder.state !== "recording") {
+      return {
+        hasReplay: Boolean(this.replayRecordingBlob),
+        isRecording: false,
+        mimeType: this.replayRecordingMimeType || null
+      };
+    }
+
+    const recorder = this.replayRecorder;
+    await new Promise((resolve) => {
+      recorder.addEventListener(
+        "stop",
+        () => {
+          this.replayRecordingBlob = new Blob(this.replayRecorderChunks, {
+            type: this.replayRecordingMimeType || "audio/webm"
+          });
+          this.replayRecorderChunks = [];
+          resolve();
+        },
+        { once: true }
+      );
+      recorder.stop();
+    });
+    emitDebug(this.tabId, "Replay recording stopped", {
+      byteLength: this.replayRecordingBlob?.size || 0,
+      mimeType: this.replayRecordingMimeType || null
+    });
+    return {
+      hasReplay: Boolean(this.replayRecordingBlob && this.replayRecordingBlob.size > 0),
+      isRecording: false,
+      mimeType: this.replayRecordingMimeType || null
+    };
+  }
+
+  async exportReplayRecording() {
+    if (this.replayRecorder?.state === "recording") {
+      throw new Error("Stop recording before saving the replay.");
+    }
+
+    if (!this.replayRecordingBlob || this.replayRecordingBlob.size === 0) {
+      throw new Error("No replay recording is available yet.");
+    }
+
+    const buffer = await this.replayRecordingBlob.arrayBuffer();
+    return {
+      bytes: Array.from(new Uint8Array(buffer)),
+      extension: "webm",
+      fileName: `polyglot-live_replay_tab-${this.tabId}_${buildTimestampForFile(new Date())}.webm`,
+      hasReplay: true,
+      isRecording: false,
+      mimeType: this.replayRecordingMimeType || this.replayRecordingBlob.type || "audio/webm"
+    };
+  }
+
+  getReplayRecordingState() {
+    return {
+      ok: true,
+      hasReplay: Boolean(this.replayRecordingBlob),
+      isRecording: this.replayRecorder?.state === "recording",
+      mimeType: this.replayRecordingMimeType || null
+    };
+  }
 }
 
 class GeminiTranslateSession {
-  constructor({ targetLanguage, tokenEndpoint, tokenSecret }) {
+  constructor({ onTranslatedAudio, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
+    this.onTranslatedAudio = onTranslatedAudio;
+    this.tabId = tabId;
     this.targetLanguage = targetLanguage;
     this.tokenEndpoint = tokenEndpoint;
     this.tokenSecret = tokenSecret;
@@ -269,15 +411,11 @@ class GeminiTranslateSession {
     this.closedByClient = false;
     this.isConnecting = true;
     this.didCompleteSetup = false;
-    console.info("[polyglot-live/offscreen] requesting ephemeral token", {
+    emitDebug(this.tabId, "Requesting ephemeral token", {
       targetLanguage: this.targetLanguage,
       tokenEndpoint: this.tokenEndpoint
     });
-    emitDebug("Requesting ephemeral token", {
-      targetLanguage: this.targetLanguage,
-      tokenEndpoint: this.tokenEndpoint
-    });
-    emitStatus("auth", "Requesting ephemeral token...");
+    emitStatus(this.tabId, "auth", "Requesting ephemeral token...");
 
     const token = await this.fetchEphemeralToken();
     await this.openLiveSession(token);
@@ -303,17 +441,17 @@ class GeminiTranslateSession {
     );
 
     if (this.chunksSent === 1) {
-      emitDebug("First PCM16 chunk sent", {
+      emitDebug(this.tabId, "First PCM16 chunk sent", {
         bytes: chunk.byteLength,
         chunkSamples: chunk.length,
         chunkDurationMs: CHUNK_DURATION_MS
       });
-      emitStatus("streaming", `Sent first audio chunk to Gemini for ${this.targetLanguage}.`);
+      emitStatus(this.tabId, "streaming", `Sent first audio chunk to Gemini for ${this.targetLanguage}.`);
       this.startAudioWatchdog();
     }
 
     if (this.chunksSent % 10 === 0) {
-      emitDebug("PCM16 traffic milestone", {
+      emitDebug(this.tabId, "PCM16 traffic milestone", {
         chunksSent: this.chunksSent,
         pendingQueuedChunks: this.pendingAudioChunks.length,
         lastAudioReceiveAt: this.lastAudioReceiveAt || null
@@ -326,7 +464,7 @@ class GeminiTranslateSession {
     this.isReady = false;
     this.pendingAudioChunks = [];
     this.stopAudioWatchdog();
-    emitDebug("Closing Gemini session", {
+    emitDebug(this.tabId, "Closing Gemini session", {
       chunksSent: this.chunksSent,
       hadTranslatedAudio: this.lastAudioReceiveAt > 0
     });
@@ -355,7 +493,7 @@ class GeminiTranslateSession {
       });
     }
 
-    emitStatus("idle", "Gemini session closed.");
+    emitStatus(this.tabId, "idle", "Gemini session closed.");
   }
 
   async fetchEphemeralToken() {
@@ -387,8 +525,7 @@ class GeminiTranslateSession {
       throw new Error("Token endpoint response did not include a token.");
     }
 
-    console.info("[polyglot-live/offscreen] ephemeral token accepted");
-    emitDebug("Ephemeral token accepted", {
+    emitDebug(this.tabId, "Ephemeral token accepted", {
       tokenNameSuffix: String(payload.token).slice(-12)
     });
     return payload.token;
@@ -404,9 +541,8 @@ class GeminiTranslateSession {
           return;
         }
 
-        console.error("[polyglot-live/offscreen] setup timed out");
-        emitDebug("Setup timed out waiting for setupComplete");
-        emitStatus("error", "Timed out waiting for Gemini setup confirmation.");
+        emitDebug(this.tabId, "Setup timed out waiting for setupComplete");
+        emitStatus(this.tabId, "error", "Timed out waiting for Gemini setup confirmation.");
         settled = true;
         if (this.websocket) {
           this.websocket.close(1000, "Setup timeout");
@@ -435,21 +571,16 @@ class GeminiTranslateSession {
             }
           };
 
-          console.info("[polyglot-live/offscreen] websocket open");
-          emitDebug("Gemini websocket opened");
-          emitStatus("connecting", "Gemini Live websocket connected. Sending setup...");
+          emitDebug(this.tabId, "Gemini websocket opened");
+          emitStatus(this.tabId, "connecting", "Gemini Live websocket connected. Sending setup...");
           this.websocket.send(JSON.stringify(setup));
-          emitDebug("Setup payload sent", setup);
+          emitDebug(this.tabId, "Setup payload sent", setup);
 
-          // The public raw WebSocket docs do not require an explicit setupComplete
-          // event before the client starts streaming audio, so proceed if the socket
-          // stays open and no schema error is returned immediately.
           optimisticReadyTimeoutId = setTimeout(() => {
             if (settled || this.isReady || !this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
               return;
             }
 
-            console.info("[polyglot-live/offscreen] no explicit setupComplete; proceeding");
             this.isConnecting = false;
             this.isReady = true;
             this.didCompleteSetup = false;
@@ -457,8 +588,8 @@ class GeminiTranslateSession {
               clearTimeout(this.setupTimeoutId);
               this.setupTimeoutId = null;
             }
-            emitDebug("No explicit setupComplete received; proceeding with audio stream");
-            emitStatus("running", `Translating live audio to ${this.targetLanguage}.`);
+            emitDebug(this.tabId, "No explicit setupComplete received; proceeding with audio stream");
+            emitStatus(this.tabId, "running", `Translating live audio to ${this.targetLanguage}.`);
             this.flushPendingAudio();
             if (!settled) {
               settled = true;
@@ -475,7 +606,7 @@ class GeminiTranslateSession {
           }
 
           if (typeof rawPayload !== "string") {
-            emitDebug("Gemini websocket non-text frame received", {
+            emitDebug(this.tabId, "Gemini websocket non-text frame received", {
               constructorName: rawPayload?.constructor?.name || typeof rawPayload
             });
             return;
@@ -485,17 +616,16 @@ class GeminiTranslateSession {
           try {
             message = JSON.parse(rawPayload);
           } catch (error) {
-            emitDebug("Gemini websocket non-JSON text frame received", {
+            emitDebug(this.tabId, "Gemini websocket non-JSON text frame received", {
               preview: rawPayload.slice(0, 200)
             });
             return;
           }
 
-          emitDebug("Gemini websocket message received", message);
+          emitDebug(this.tabId, "Gemini websocket message received", message);
           this.handleServerMessage(message);
 
           if (message.setupComplete) {
-            console.info("[polyglot-live/offscreen] setup complete");
             this.isConnecting = false;
             this.isReady = true;
             this.didCompleteSetup = true;
@@ -507,8 +637,8 @@ class GeminiTranslateSession {
               clearTimeout(this.setupTimeoutId);
               this.setupTimeoutId = null;
             }
-            emitStatus("running", `Translating live audio to ${this.targetLanguage}.`);
-            emitDebug("Setup complete acknowledged by Gemini");
+            emitStatus(this.tabId, "running", `Translating live audio to ${this.targetLanguage}.`);
+            emitDebug(this.tabId, "Setup complete acknowledged by Gemini");
             this.flushPendingAudio();
             if (!settled) {
               settled = true;
@@ -518,8 +648,7 @@ class GeminiTranslateSession {
         };
 
         this.websocket.onerror = () => {
-          console.error("[polyglot-live/offscreen] websocket error");
-          emitDebug("Gemini websocket error event");
+          emitDebug(this.tabId, "Gemini websocket error event");
           if (optimisticReadyTimeoutId) {
             clearTimeout(optimisticReadyTimeoutId);
             optimisticReadyTimeoutId = null;
@@ -535,12 +664,7 @@ class GeminiTranslateSession {
         };
 
         this.websocket.onclose = (event) => {
-          console.info("[polyglot-live/offscreen] websocket closed", {
-            code: event.code,
-            reason: event.reason,
-            wasClean: event.wasClean
-          });
-          emitDebug("Gemini websocket closed", {
+          emitDebug(this.tabId, "Gemini websocket closed", {
             code: event.code,
             reason: event.reason,
             wasClean: event.wasClean
@@ -585,18 +709,19 @@ class GeminiTranslateSession {
   handleServerMessage(response) {
     if (response.sessionResumptionUpdate?.resumable && response.sessionResumptionUpdate.newHandle) {
       this.resumptionHandle = response.sessionResumptionUpdate.newHandle;
-      emitDebug("Received session resumption handle", {
+      emitDebug(this.tabId, "Received session resumption handle", {
         handleSuffix: String(this.resumptionHandle).slice(-12)
       });
     }
 
     if (response.goAway) {
-      emitStatus("reconnecting", "Gemini sent a go-away notice. Waiting to resume...");
+      emitStatus(this.tabId, "reconnecting", "Gemini sent a go-away notice. Waiting to resume...");
     }
 
     if (response.serverContent?.inputTranscription?.text) {
       chrome.runtime.sendMessage({
         type: "SESSION_EVENT",
+        tabId: this.tabId,
         event: "transcript",
         payload: {
           kind: "input",
@@ -608,6 +733,7 @@ class GeminiTranslateSession {
     if (response.serverContent?.outputTranscription?.text) {
       chrome.runtime.sendMessage({
         type: "SESSION_EVENT",
+        tabId: this.tabId,
         event: "transcript",
         payload: {
           kind: "output",
@@ -621,7 +747,7 @@ class GeminiTranslateSession {
       if (part.inlineData?.data) {
         this.lastAudioReceiveAt = Date.now();
         const audioDurationMs = estimateTranslatedAudioDurationMs(part.inlineData.data);
-        emitDebug("Translated audio packet received", {
+        emitDebug(this.tabId, "Translated audio packet received", {
           durationMs: audioDurationMs,
           base64Length: part.inlineData.data.length,
           mimeType: part.inlineData.mimeType || null
@@ -630,23 +756,25 @@ class GeminiTranslateSession {
           this.hasEmittedTranslatedAudioStart = true;
           chrome.runtime.sendMessage({
             type: "SESSION_EVENT",
+            tabId: this.tabId,
             event: "translated_audio_started",
             payload: {
               targetLanguage: this.targetLanguage
             }
           });
-          emitDebug("First translated audio packet received");
+          emitDebug(this.tabId, "First translated audio packet received");
         }
         chrome.runtime.sendMessage({
           type: "SESSION_EVENT",
+          tabId: this.tabId,
           event: "audio_timing",
           payload: {
             durationMs: audioDurationMs,
             kind: "output_audio"
           }
         });
-        emitStatus("running", `Receiving translated audio for ${this.targetLanguage}.`);
-        playTranslatedAudio(part.inlineData.data);
+        emitStatus(this.tabId, "running", `Receiving translated audio for ${this.targetLanguage}.`);
+        this.onTranslatedAudio(part.inlineData.data);
       }
     }
   }
@@ -671,13 +799,9 @@ class GeminiTranslateSession {
     }
 
     this.pendingAudioChunks = [];
-    emitDebug("Flushed queued audio chunks", {
+    emitDebug(this.tabId, "Flushed queued audio chunks", {
       chunksSent: this.chunksSent
     });
-  }
-
-  async reconnect() {
-    emitStatus("error", "Automatic reconnect is disabled during handshake debugging.");
   }
 
   startAudioWatchdog() {
@@ -688,11 +812,12 @@ class GeminiTranslateSession {
       }
 
       if (this.lastAudioReceiveAt === 0 && this.chunksSent >= 10) {
-        emitDebug("No translated audio returned yet", {
+        emitDebug(this.tabId, "No translated audio returned yet", {
           chunksSent: this.chunksSent,
           targetLanguage: this.targetLanguage
         });
         emitStatus(
+          this.tabId,
           "streaming",
           `Audio is being sent to Gemini, but no translated audio has returned yet for ${this.targetLanguage}.`
         );
@@ -706,6 +831,78 @@ class GeminiTranslateSession {
       this.audioWatchdogId = null;
     }
   }
+}
+
+function emitStatus(tabId, phase, message) {
+  chrome.runtime.sendMessage({
+    type: "SESSION_EVENT",
+    tabId,
+    event: "status",
+    payload: { phase, message }
+  });
+}
+
+function emitDebug(tabId, message, details = undefined) {
+  chrome.runtime
+    .sendMessage({
+      type: "SESSION_DEBUG",
+      tabId,
+      payload: {
+        message,
+        details
+      }
+    })
+    .catch(() => {
+      return undefined;
+    });
+}
+
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  if (outputSampleRate >= inputSampleRate) {
+    return buffer;
+  }
+
+  const sampleRateRatio = inputSampleRate / outputSampleRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0;
+    let count = 0;
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i += 1) {
+      accum += buffer[i];
+      count += 1;
+    }
+
+    result[offsetResult] = count > 0 ? accum / count : 0;
+    offsetResult += 1;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return result;
+}
+
+function float32ToPcm16(float32Buffer) {
+  const output = new Int16Array(float32Buffer.length);
+
+  for (let i = 0; i < float32Buffer.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, float32Buffer[i]));
+    output[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+
+  return output;
+}
+
+function concatInt16Arrays(left, right) {
+  const result = new Int16Array(left.length + right.length);
+  result.set(left, 0);
+  result.set(right, left.length);
+  return result;
 }
 
 function pcm16ToBase64(samples) {
@@ -730,117 +927,6 @@ function base64ToInt16Array(base64Value) {
   return new Int16Array(bytes.buffer);
 }
 
-function playTranslatedAudio(base64Audio) {
-  if (!audioContext) {
-    return;
-  }
-
-  const pcm16 = base64ToInt16Array(base64Audio);
-  const audioBuffer = audioContext.createBuffer(1, pcm16.length, OUTPUT_SAMPLE_RATE);
-  const channelData = audioBuffer.getChannelData(0);
-
-  for (let i = 0; i < pcm16.length; i += 1) {
-    channelData[i] = pcm16[i] / 0x8000;
-  }
-
-  const source = audioContext.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(audioContext.destination);
-  if (replayCaptureDestination) {
-    source.connect(replayCaptureDestination);
-  }
-
-  const startTime = Math.max(audioContext.currentTime + 0.02, playbackCursorTime);
-  source.start(startTime);
-  playbackCursorTime = startTime + audioBuffer.duration;
-}
-
-async function startReplayRecording() {
-  if (!audioContext || !replayCaptureDestination) {
-    throw new Error("Start translation before starting a replay recording.");
-  }
-
-  if (replayRecorder?.state === "recording") {
-    throw new Error("Replay recording is already in progress.");
-  }
-
-  replayRecordingMimeType = pickReplayRecordingMimeType();
-  if (!replayRecordingMimeType) {
-    throw new Error("This browser does not support WebM audio recording.");
-  }
-
-  replayRecordingBlob = null;
-  replayRecorderChunks = [];
-  replayRecorder = new MediaRecorder(replayCaptureDestination.stream, {
-    mimeType: replayRecordingMimeType
-  });
-  replayRecorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      replayRecorderChunks.push(event.data);
-    }
-  };
-  replayRecorder.start(1000);
-  emitDebug("Replay recording started", { mimeType: replayRecordingMimeType });
-  return {
-    hasReplay: false,
-    isRecording: true,
-    mimeType: replayRecordingMimeType
-  };
-}
-
-async function stopReplayRecording() {
-  if (!replayRecorder || replayRecorder.state !== "recording") {
-    return {
-      hasReplay: Boolean(replayRecordingBlob),
-      isRecording: false,
-      mimeType: replayRecordingMimeType || null
-    };
-  }
-
-  const recorder = replayRecorder;
-  await new Promise((resolve) => {
-    recorder.addEventListener(
-      "stop",
-      () => {
-        replayRecordingBlob = new Blob(replayRecorderChunks, {
-          type: replayRecordingMimeType || "audio/webm"
-        });
-        replayRecorderChunks = [];
-        resolve();
-      },
-      { once: true }
-    );
-    recorder.stop();
-  });
-  emitDebug("Replay recording stopped", {
-    byteLength: replayRecordingBlob?.size || 0,
-    mimeType: replayRecordingMimeType || null
-  });
-  return {
-    hasReplay: Boolean(replayRecordingBlob && replayRecordingBlob.size > 0),
-    isRecording: false,
-    mimeType: replayRecordingMimeType || null
-  };
-}
-
-async function exportReplayRecording() {
-  if (replayRecorder?.state === "recording") {
-    throw new Error("Stop recording before saving the replay.");
-  }
-
-  if (!replayRecordingBlob || replayRecordingBlob.size === 0) {
-    throw new Error("No replay recording is available yet.");
-  }
-
-  const buffer = await replayRecordingBlob.arrayBuffer();
-  return {
-    bytes: Array.from(new Uint8Array(buffer)),
-    extension: "webm",
-    fileName: `polyglot-live_replay_${buildTimestampForFile(new Date())}.webm`,
-    mimeType: replayRecordingMimeType || replayRecordingBlob.type || "audio/webm"
-  };
-}
-
 function pickReplayRecordingMimeType() {
   const candidates = ["audio/webm;codecs=opus", "audio/webm"];
   return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
@@ -859,16 +945,4 @@ function buildTimestampForFile(date) {
 function estimateTranslatedAudioDurationMs(base64Audio) {
   const pcm16 = base64ToInt16Array(base64Audio);
   return Math.round((pcm16.length / OUTPUT_SAMPLE_RATE) * 1000);
-}
-
-function emitDebug(message, details = undefined) {
-  chrome.runtime.sendMessage({
-    type: "SESSION_DEBUG",
-    payload: {
-      message,
-      details
-    }
-  }).catch(() => {
-    return undefined;
-  });
 }
