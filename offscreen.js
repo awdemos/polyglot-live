@@ -63,16 +63,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "OFFSCREEN_UPDATE_ORIGINAL_AUDIO_MIX") {
+    try {
+      const pipeline = getPipelineOrThrow(message.tabId);
+      pipeline.setOriginalAudioMixPercent(message.originalAudioMixPercent);
+      sendResponse({ ok: true, originalAudioMixPercent: pipeline.originalAudioMixPercent });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message });
+    }
+    return false;
+  }
+
   return false;
 });
 
-async function startPipeline({ streamId, tabId, targetLanguage, passThroughOriginalAudio, tokenEndpoint, tokenSecret }) {
+async function startPipeline({ streamId, tabId, targetLanguage, originalAudioMixPercent, tokenEndpoint, tokenSecret }) {
   if (!tabId) {
     throw new Error("A tab id is required to start the offscreen pipeline.");
   }
 
   emitDebug(tabId, "Starting offscreen pipeline", {
-    passThroughOriginalAudio,
+    originalAudioMixPercent,
     streamId,
     targetLanguage,
     tokenEndpoint
@@ -84,7 +95,7 @@ async function startPipeline({ streamId, tabId, targetLanguage, passThroughOrigi
   }
 
   const pipeline = new TabAudioPipeline({
-    passThroughOriginalAudio,
+    originalAudioMixPercent,
     streamId,
     tabId,
     targetLanguage,
@@ -127,8 +138,8 @@ function getPipelineOrThrow(tabId) {
 }
 
 class TabAudioPipeline {
-  constructor({ passThroughOriginalAudio, streamId, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
-    this.passThroughOriginalAudio = passThroughOriginalAudio;
+  constructor({ originalAudioMixPercent, streamId, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
+    this.originalAudioMixPercent = normalizeOriginalAudioMixPercent(originalAudioMixPercent);
     this.streamId = streamId;
     this.tabId = tabId;
     this.targetLanguage = targetLanguage;
@@ -184,9 +195,10 @@ class TabAudioPipeline {
       outputChannelCount: [1]
     });
     this.passThroughGain = this.audioContext.createGain();
-    this.passThroughGain.gain.value = this.passThroughOriginalAudio ? 1 : 0;
+    this.passThroughGain.gain.value = this.originalAudioMixPercent / 100;
     emitDebug(this.tabId, "Audio nodes wired", {
       passThroughGain: this.passThroughGain.gain.value,
+      originalAudioMixPercent: this.originalAudioMixPercent,
       processorType: "AudioWorkletNode"
     });
 
@@ -249,6 +261,17 @@ class TabAudioPipeline {
     this.replayCaptureDestination = null;
     this.pendingPcm16 = new Int16Array(0);
     this.playbackCursorTime = 0;
+  }
+
+  setOriginalAudioMixPercent(originalAudioMixPercent) {
+    this.originalAudioMixPercent = normalizeOriginalAudioMixPercent(originalAudioMixPercent);
+    if (this.passThroughGain) {
+      this.passThroughGain.gain.value = this.originalAudioMixPercent / 100;
+    }
+    emitDebug(this.tabId, "Original audio mix updated", {
+      originalAudioMixPercent: this.originalAudioMixPercent,
+      passThroughGain: this.passThroughGain?.gain?.value ?? null
+    });
   }
 
   enqueuePcm16(chunk) {
@@ -945,4 +968,13 @@ function buildTimestampForFile(date) {
 function estimateTranslatedAudioDurationMs(base64Audio) {
   const pcm16 = base64ToInt16Array(base64Audio);
   return Math.round((pcm16.length / OUTPUT_SAMPLE_RATE) * 1000);
+}
+
+function normalizeOriginalAudioMixPercent(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return 0;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(numericValue)));
 }

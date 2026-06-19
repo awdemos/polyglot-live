@@ -7,6 +7,13 @@ export const DEFAULT_TOKEN_ENDPOINT = "http://127.0.0.1:8787/token";
 export const LIVE_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained";
 export const DEFAULT_TARGET_LANGUAGE_CODE = "es";
+export const DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS = 5;
+export const DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT = 0;
+export const LIVE_TRANSLATE_AUDIO_INPUT_COST_PER_MINUTE_USD = 0.0053;
+export const LIVE_TRANSLATE_AUDIO_OUTPUT_COST_PER_MINUTE_USD = 0.0315;
+export const LIVE_TRANSLATE_ESTIMATED_COST_PER_MINUTE_USD =
+  LIVE_TRANSLATE_AUDIO_INPUT_COST_PER_MINUTE_USD + LIVE_TRANSLATE_AUDIO_OUTPUT_COST_PER_MINUTE_USD;
+export const RTL_LANGUAGE_CODES = ["ar", "fa", "he", "sd", "ur"];
 export const SUPPORTED_TRANSLATION_LANGUAGES = [
   { code: "af", label: "Afrikaans" },
   { code: "ak", label: "Akan" },

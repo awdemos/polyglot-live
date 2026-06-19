@@ -15,6 +15,11 @@
         </div>
         <h1>polyglot-live</h1>
         <p class="lede">Play the tab audio first, then press Start here to begin translation. Nothing auto-starts.</p>
+        <div class="cost-banner" aria-live="polite">
+          <span class="cost-label">Estimated session cost</span>
+          <strong id="sessionCostValue" class="cost-value">$0.00</strong>
+          <span id="sessionCostMeta" class="cost-meta">(Free during "2.5 Live" model preview)</span>
+        </div>
       </header>
 
       <section class="card">
@@ -23,29 +28,19 @@
           <select id="targetLanguage"></select>
         </label>
 
+        <label class="field">
+          <span>Original audio mix</span>
+          <div class="range-field">
+            <input id="originalAudioMixPercent" type="range" min="0" max="100" step="1">
+            <span id="originalAudioMixPercentValue" class="range-value">0%</span>
+          </div>
+        </label>
+
         <div class="actions">
           <button id="startButton" type="button">Start</button>
           <button id="stopButton" type="button" class="secondary">Stop</button>
         </div>
       </section>
-
-      <details class="accordion card">
-        <summary class="accordion-summary">
-          <span>Replay Recording</span>
-          <span id="recordingIndicator" class="recording-indicator">
-            <span class="recording-dot"></span>
-            <span class="recording-label">idle</span>
-          </span>
-        </summary>
-        <div class="accordion-body">
-          <div class="recording-actions recording-actions-body">
-            <button id="startRecordingButton" type="button" class="toolbar-button">Start recording</button>
-            <button id="stopRecordingButton" type="button" class="toolbar-button">Stop recording</button>
-            <button id="saveReplayButton" type="button" class="toolbar-button">Save replay</button>
-          </div>
-          <p id="recordingMessage" class="hint">Replay recording captures translated audio as WebM for later playback.</p>
-        </div>
-      </details>
 
       <section class="card transcript-shell">
         <div class="status-head">
@@ -80,6 +75,38 @@
           </details>
         </div>
       </section>
+
+      <details class="accordion card">
+        <summary class="accordion-summary">
+          <span>Audio Alignment</span>
+          <span class="muted">resume lag</span>
+        </summary>
+        <div class="accordion-body">
+          <label class="field">
+            <span>Resume lag (seconds)</span>
+            <input id="sourceResumeDelaySeconds" type="number" min="0" max="30" step="1" inputmode="numeric">
+          </label>
+          <p class="hint">Delays source tab media resume after translated audio begins so visuals line up more closely.</p>
+        </div>
+      </details>
+
+      <details class="accordion card">
+        <summary class="accordion-summary">
+          <span>Replay Recording</span>
+          <span id="recordingIndicator" class="recording-indicator">
+            <span class="recording-dot"></span>
+            <span class="recording-label">idle</span>
+          </span>
+        </summary>
+        <div class="accordion-body">
+          <div class="recording-actions recording-actions-body">
+            <button id="startRecordingButton" type="button" class="toolbar-button">Start recording</button>
+            <button id="stopRecordingButton" type="button" class="toolbar-button">Stop recording</button>
+            <button id="saveReplayButton" type="button" class="toolbar-button">Save replay</button>
+          </div>
+          <p id="recordingMessage" class="hint">Replay recording captures translated audio as WebM for later playback.</p>
+        </div>
+      </details>
 
       <details class="accordion card">
         <summary class="accordion-summary">

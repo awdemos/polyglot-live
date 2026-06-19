@@ -1,11 +1,18 @@
 import {
+  DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
+  DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
   DEFAULT_TARGET_LANGUAGE_CODE,
   DEFAULT_TOKEN_ENDPOINT,
+  LIVE_TRANSLATE_ESTIMATED_COST_PER_MINUTE_USD,
+  RTL_LANGUAGE_CODES,
   SUPPORTED_TRANSLATION_LANGUAGES
 } from "./config.js";
 const targetLanguageInput = document.querySelector("#targetLanguage");
 const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
+const sourceResumeDelaySecondsInput = document.querySelector("#sourceResumeDelaySeconds");
+const originalAudioMixPercentInput = document.querySelector("#originalAudioMixPercent");
+const originalAudioMixPercentValue = document.querySelector("#originalAudioMixPercentValue");
 const startRecordingButton = document.querySelector("#startRecordingButton");
 const stopRecordingButton = document.querySelector("#stopRecordingButton");
 const saveReplayButton = document.querySelector("#saveReplayButton");
@@ -24,8 +31,12 @@ const tokenSecretInput = document.querySelector("#tokenSecret");
 const checkAuthButton = document.querySelector("#checkAuthButton");
 const authMessage = document.querySelector("#authMessage");
 const themeToggleButton = document.querySelector("#themeToggleButton");
+const costBanner = document.querySelector(".cost-banner");
+const sessionCostValue = document.querySelector("#sessionCostValue");
+const sessionCostMeta = document.querySelector("#sessionCostMeta");
 const originalPlaceholder = "Original transcript will appear here as speech is detected.";
 let sessionPollId = null;
+let sessionCostTimerId = null;
 let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
 let activeHighlightTimeoutId = null;
@@ -33,6 +44,8 @@ let lastStartedTargetLanguage = null;
 let replayHasSavedCapture = false;
 let replayIsRecording = false;
 let currentTabId = null;
+let currentSessionStartedAt = null;
+let currentEstimatedCostMs = 0;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 
@@ -175,7 +188,7 @@ startButton.addEventListener("click", async () => {
 
   const response = await chrome.runtime.sendMessage({
     type: "START_TRANSLATION",
-    passThroughOriginalAudio: false,
+    originalAudioMixPercent: normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value),
     tabId: currentTabId,
     targetLanguage: selectedTargetLanguage
   });
@@ -194,6 +207,9 @@ startButton.addEventListener("click", async () => {
   }
 
   lastStartedTargetLanguage = selectedTargetLanguage;
+  currentSessionStartedAt = typeof response.startedAt === "number" && Number.isFinite(response.startedAt)
+    ? response.startedAt
+    : Date.now();
   updateStatus("running", `Session started on tab ${response.tabId}.`);
 });
 
@@ -223,6 +239,9 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message.event === "status") {
+    if (typeof message.payload?.estimatedCostMs === "number" && Number.isFinite(message.payload.estimatedCostMs)) {
+      currentEstimatedCostMs = message.payload.estimatedCostMs;
+    }
     updateStatus(message.payload.phase, message.payload.message);
   }
 
@@ -252,6 +271,8 @@ function updateStatus(phase, message) {
   }
   syncButtonsForPhase(phase);
   syncPollingForPhase(phase);
+  syncCostTimerForPhase(phase);
+  renderSessionCost();
 }
 
 async function initialize() {
@@ -265,6 +286,11 @@ async function initialize() {
   applyTheme(panelTheme);
   renderTargetLanguageOptions();
   targetLanguageInput.value = normalizeTargetLanguageCode(translationPrefs.targetLanguage);
+  sourceResumeDelaySecondsInput.value = String(
+    normalizeSourceMediaResumeDelaySeconds(translationPrefs.sourceMediaResumeDelaySeconds)
+  );
+  originalAudioMixPercentInput.value = String(normalizeOriginalAudioMixPercent(translationPrefs.originalAudioMixPercent));
+  updateOriginalAudioMixPercentValue();
   updateTargetLanguagePresentation(targetLanguageInput.value);
 
   tokenEndpointInput.addEventListener("change", () => {
@@ -281,8 +307,29 @@ async function initialize() {
     void persistTranslationPrefs();
   });
 
+  sourceResumeDelaySecondsInput.addEventListener("change", () => {
+    sourceResumeDelaySecondsInput.value = String(
+      normalizeSourceMediaResumeDelaySeconds(sourceResumeDelaySecondsInput.value)
+    );
+    void persistTranslationPrefs();
+  });
+
+  originalAudioMixPercentInput.addEventListener("input", () => {
+    originalAudioMixPercentInput.value = String(normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value));
+    updateOriginalAudioMixPercentValue();
+    void maybeUpdateOriginalAudioMixInSession();
+  });
+
+  originalAudioMixPercentInput.addEventListener("change", () => {
+    originalAudioMixPercentInput.value = String(normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value));
+    updateOriginalAudioMixPercentValue();
+    void persistTranslationPrefs();
+    void maybeUpdateOriginalAudioMixInSession();
+  });
+
   updateAuthMessage("Not checked yet.");
   updateRecordingMessage("Replay recording captures translated audio as WebM for later playback.");
+  renderSessionCost();
   resetTranscriptOutputs();
   chrome.tabs.onActivated.addListener(() => {
     void refreshActiveTabContext();
@@ -309,7 +356,8 @@ async function persistTranslationPrefs() {
   const targetLanguage = getSelectedTargetLanguageCode();
   await chrome.storage.local.set({
     translationPrefs: {
-      passThroughOriginalAudio: false,
+      originalAudioMixPercent: normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value),
+      sourceMediaResumeDelaySeconds: normalizeSourceMediaResumeDelaySeconds(sourceResumeDelaySecondsInput.value),
       targetLanguage
     }
   });
@@ -431,12 +479,21 @@ function resetTranscriptOutputs() {
   originalTranscriptOutput.textContent = originalPlaceholder;
   translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
   translatedTranscriptOutput.className = "translated-transcript-empty";
+  applyTranslatedTranscriptDirection(getSelectedTargetLanguageCode());
   translatedSegments = [];
   pendingTranslatedAudioMs = 0;
   if (activeHighlightTimeoutId) {
     clearTimeout(activeHighlightTimeoutId);
     activeHighlightTimeoutId = null;
   }
+}
+
+function renderSessionCost() {
+  const isActiveSession = Boolean(currentSessionStartedAt) && isCostTrackingPhase(phaseBadge.textContent || "idle");
+  costBanner.classList.toggle("is-active", isActiveSession);
+  const estimatedUsd = (Math.max(0, currentEstimatedCostMs) / 60000) * LIVE_TRANSLATE_ESTIMATED_COST_PER_MINUTE_USD;
+  sessionCostValue.textContent = formatUsd(estimatedUsd);
+  sessionCostMeta.textContent = `(Free during "2.5 Live" model preview)`;
 }
 
 function appendTranscript(payload) {
@@ -768,6 +825,7 @@ function updateTargetLanguagePresentation(targetLanguageCode) {
     SUPPORTED_TRANSLATION_LANGUAGES.find((language) => language.code === normalizedCode)?.label ||
     "Translated";
   translatedPaneTitle.textContent = label;
+  applyTranslatedTranscriptDirection(normalizedCode);
   if (translatedTranscriptOutput.classList.contains("translated-transcript-empty")) {
     translatedTranscriptOutput.textContent = `${label} translation will appear here as Gemini returns audio/text events.`;
   }
@@ -775,6 +833,7 @@ function updateTargetLanguagePresentation(targetLanguageCode) {
 
 async function syncSessionState() {
   if (!currentTabId) {
+    currentEstimatedCostMs = 0;
     updateStatus("idle", "No active browser tab is available for translation.");
     resetTranscriptOutputs();
     return;
@@ -790,6 +849,23 @@ async function syncSessionState() {
     updateTargetLanguagePresentation(targetLanguageInput.value);
   }
 
+  if (response.sourceMediaResumeDelaySeconds !== undefined) {
+    sourceResumeDelaySecondsInput.value = String(
+      normalizeSourceMediaResumeDelaySeconds(response.sourceMediaResumeDelaySeconds)
+    );
+  }
+
+  if (response.originalAudioMixPercent !== undefined) {
+    originalAudioMixPercentInput.value = String(normalizeOriginalAudioMixPercent(response.originalAudioMixPercent));
+    updateOriginalAudioMixPercentValue();
+  }
+
+  if (typeof response.estimatedCostMs === "number" && Number.isFinite(response.estimatedCostMs)) {
+    currentEstimatedCostMs = response.estimatedCostMs;
+  }
+
+  currentSessionStartedAt =
+    typeof response.startedAt === "number" && Number.isFinite(response.startedAt) ? response.startedAt : null;
   applyTranscriptSnapshot(response.transcripts);
   updateStatus(response.phase || "idle", response.statusMessage || "Ready to start a translation session.");
 }
@@ -855,9 +931,11 @@ async function refreshActiveTabContext() {
 
   currentTabId = nextTabId;
   lastStartedTargetLanguage = null;
+  currentSessionStartedAt = null;
   resetTranscriptOutputs();
 
   if (!currentTabId) {
+    currentEstimatedCostMs = 0;
     updateStatus("idle", "No active browser tab is available for translation.");
     replayIsRecording = false;
     replayHasSavedCapture = false;
@@ -880,6 +958,7 @@ function applyTranscriptSnapshot(transcripts = {}) {
   }
 
   originalTranscriptOutput.textContent = originalText || originalPlaceholder;
+  applyTranslatedTranscriptDirection(getSelectedTargetLanguageCode());
 
   if (translatedText) {
     translatedTranscriptOutput.textContent = translatedText;
@@ -889,6 +968,12 @@ function applyTranscriptSnapshot(transcripts = {}) {
     translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
     translatedTranscriptOutput.className = "translated-transcript-empty";
   }
+}
+
+function applyTranslatedTranscriptDirection(targetLanguageCode) {
+  const isRtlLanguage = RTL_LANGUAGE_CODES.includes(normalizeTargetLanguageCode(targetLanguageCode));
+  translatedTranscriptOutput.classList.toggle("is-rtl", isRtlLanguage);
+  translatedTranscriptOutput.dir = isRtlLanguage ? "rtl" : "ltr";
 }
 
 function syncPollingForPhase(phase) {
@@ -910,4 +995,74 @@ function syncPollingForPhase(phase) {
       void syncSessionState();
     }, 1000);
   }
+}
+
+function syncCostTimerForPhase(phase) {
+  const shouldTick = isCostTrackingPhase(phase) && Boolean(currentSessionStartedAt) && Boolean(currentTabId);
+
+  if (!shouldTick && sessionCostTimerId) {
+    clearInterval(sessionCostTimerId);
+    sessionCostTimerId = null;
+    return;
+  }
+
+  if (shouldTick && !sessionCostTimerId) {
+    sessionCostTimerId = setInterval(() => {
+      void syncSessionState();
+    }, 1000);
+  }
+}
+
+function isCostTrackingPhase(phase) {
+  return phase === "starting" || phase === "connecting" || phase === "running" || phase === "streaming" || phase === "reconnecting";
+}
+
+function formatUsd(value) {
+  return new Intl.NumberFormat("en-US", {
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+    style: "currency"
+  }).format(value);
+}
+
+function normalizeSourceMediaResumeDelaySeconds(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS;
+  }
+
+  return Math.min(30, Math.max(0, Math.round(numericValue)));
+}
+
+function normalizeOriginalAudioMixPercent(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(numericValue)));
+}
+
+function updateOriginalAudioMixPercentValue() {
+  originalAudioMixPercentValue.textContent = `${normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value)}%`;
+}
+
+async function maybeUpdateOriginalAudioMixInSession() {
+  if (!currentTabId) {
+    return;
+  }
+
+  const phase = phaseBadge.textContent || "idle";
+  if (phase !== "running" && phase !== "streaming" && phase !== "connecting" && phase !== "starting") {
+    return;
+  }
+
+  await chrome.runtime.sendMessage({
+    type: "UPDATE_ORIGINAL_AUDIO_MIX",
+    tabId: currentTabId,
+    originalAudioMixPercent: normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value)
+  }).catch(() => {
+    return undefined;
+  });
 }

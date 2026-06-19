@@ -1,4 +1,9 @@
-import { DEFAULT_TARGET_LANGUAGE_CODE, DEFAULT_TOKEN_ENDPOINT } from "./config.js";
+import {
+  DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
+  DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
+  DEFAULT_TARGET_LANGUAGE_CODE,
+  DEFAULT_TOKEN_ENDPOINT
+} from "./config.js";
 
 const OFFSCREEN_PATH = "offscreen.html";
 const CONTEXT_MENU_ID = "translate-tab-audio";
@@ -6,6 +11,10 @@ const DEFAULT_STATUS_MESSAGE = "Manual start only. Play tab audio first, then pr
 const sessions = new Map();
 const startingTabs = new Set();
 const stoppingTabs = new Set();
+const extensionCostTracker = {
+  accumulatedMs: 0,
+  activeRuns: new Map()
+};
 
 chrome.runtime.onInstalled.addListener(async () => {
   console.info("[polyglot-live/background] installed");
@@ -57,6 +66,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     clearSessionTranscripts(resolveTabIdFromMessage(message, sender));
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (message.type === "UPDATE_ORIGINAL_AUDIO_MIX") {
+    const tabId = resolveTabIdFromMessage(message, sender);
+    updateOriginalAudioMix(tabId, message.originalAudioMixPercent)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 
   if (message.type === "START_REPLAY_RECORDING") {
@@ -135,12 +152,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function startTranslation(message, sender) {
   console.info("[polyglot-live/background] start requested", {
     targetLanguage: message.targetLanguage,
-    passThroughOriginalAudio: message.passThroughOriginalAudio,
+    originalAudioMixPercent: message.originalAudioMixPercent,
     tabId: message.tabId
   });
   const tabId = await resolveTabIdForStart(message, sender);
   return startTranslationFromTab(tabId, {
-    passThroughOriginalAudio: message.passThroughOriginalAudio,
+    originalAudioMixPercent: message.originalAudioMixPercent,
     targetLanguage: message.targetLanguage
   });
 }
@@ -156,7 +173,10 @@ async function getAuthConfig() {
 async function getTranslationPreferences() {
   const { translationPrefs = {} } = await chrome.storage.local.get("translationPrefs");
   return {
-    passThroughOriginalAudio: Boolean(translationPrefs.passThroughOriginalAudio),
+    originalAudioMixPercent: normalizeOriginalAudioMixPercent(
+      translationPrefs.originalAudioMixPercent ?? (translationPrefs.passThroughOriginalAudio ? 100 : undefined)
+    ),
+    sourceMediaResumeDelaySeconds: normalizeSourceMediaResumeDelaySeconds(translationPrefs.sourceMediaResumeDelaySeconds),
     targetLanguage: translationPrefs.targetLanguage || DEFAULT_TARGET_LANGUAGE_CODE
   };
 }
@@ -208,6 +228,11 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     sessionState.startedAt = Date.now();
     sessionState.tabId = tabId;
     sessionState.targetLanguage = translationPrefs.targetLanguage;
+    sessionState.originalAudioMixPercent = normalizeOriginalAudioMixPercent(translationPrefs.originalAudioMixPercent);
+    sessionState.sourceMediaResumeDelaySeconds = normalizeSourceMediaResumeDelaySeconds(
+      translationPrefs.sourceMediaResumeDelaySeconds
+    );
+    startCostRun(tabId, sessionState.startedAt);
 
     const pauseResult = await pauseTabMedia(tabId);
     sessionState.didPauseSourceMedia = pauseResult.didPausePlayback;
@@ -217,7 +242,7 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     const offscreenResponse = await chrome.runtime.sendMessage({
       type: "OFFSCREEN_START",
       payload: {
-        passThroughOriginalAudio: translationPrefs.passThroughOriginalAudio,
+        originalAudioMixPercent: normalizeOriginalAudioMixPercent(translationPrefs.originalAudioMixPercent),
         streamId,
         tabId,
         tokenEndpoint: authConfig.tokenEndpoint,
@@ -236,7 +261,10 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     }
 
     updateSessionState(tabId, "starting", `Capturing tab audio for ${translationPrefs.targetLanguage}.`);
-    return { tabId };
+    return {
+      startedAt: sessionState.startedAt,
+      tabId
+    };
   } catch (error) {
     updateSessionState(tabId, "error", error.message);
     throw error;
@@ -312,10 +340,37 @@ function updateSessionState(tabId, phase, message) {
     tabId,
     event: "status",
     payload: {
+      estimatedCostMs: getTotalEstimatedCostMs(),
       phase,
       message
     }
   });
+}
+
+async function updateOriginalAudioMix(tabId, originalAudioMixPercent) {
+  if (!tabId) {
+    throw new Error("No active tab is available for audio mix updates.");
+  }
+
+  const sessionState = getSession(tabId);
+  const normalizedPercent = normalizeOriginalAudioMixPercent(originalAudioMixPercent);
+  sessionState.originalAudioMixPercent = normalizedPercent;
+
+  if (!sessionState.activeSession) {
+    return { originalAudioMixPercent: normalizedPercent };
+  }
+
+  const response = await forwardToOffscreen({
+    type: "OFFSCREEN_UPDATE_ORIGINAL_AUDIO_MIX",
+    tabId,
+    originalAudioMixPercent: normalizedPercent
+  });
+
+  if (!response?.ok) {
+    throw new Error(response?.error || "Unable to update original audio mix.");
+  }
+
+  return { originalAudioMixPercent: normalizedPercent };
 }
 
 async function forwardToOffscreen(message) {
@@ -367,19 +422,35 @@ async function resumePausedTabMedia(tabId) {
     return;
   }
 
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { allFrames: true, tabId },
-      func: resumeMediaElementsForPolyglot
-    });
-    const resumedCount = results.reduce((sum, frame) => sum + Number(frame.result?.resumedCount || 0), 0);
-    console.info("[polyglot-live/background] source media resume result", { resumedCount, tabId });
-  } catch (error) {
-    console.warn("[polyglot-live/background] unable to resume source media", { tabId, error });
-  } finally {
-    sessionState.awaitingTranslatedAudioStart = false;
-    sessionState.didPauseSourceMedia = false;
+  if (sessionState.pendingResumeTimeoutId) {
+    return;
   }
+
+  sessionState.pendingResumeTimeoutId = setTimeout(async () => {
+    sessionState.pendingResumeTimeoutId = null;
+
+    if (!sessionState.didPauseSourceMedia) {
+      return;
+    }
+
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { allFrames: true, tabId },
+        func: resumeMediaElementsForPolyglot
+      });
+      const resumedCount = results.reduce((sum, frame) => sum + Number(frame.result?.resumedCount || 0), 0);
+      console.info("[polyglot-live/background] source media resume result", {
+        resumedCount,
+        resumeDelayMs: getSourceMediaResumeDelayMs(sessionState),
+        tabId
+      });
+    } catch (error) {
+      console.warn("[polyglot-live/background] unable to resume source media", { tabId, error });
+    } finally {
+      sessionState.awaitingTranslatedAudioStart = false;
+      sessionState.didPauseSourceMedia = false;
+    }
+  }, getSourceMediaResumeDelayMs(sessionState));
 }
 
 function pauseMediaElementsForPolyglot() {
@@ -453,10 +524,13 @@ function createSessionState(tabId) {
     awaitingTranslatedAudioStart: false,
     didPauseSourceMedia: false,
     phase: "idle",
+    pendingResumeTimeoutId: null,
     replay: {
       hasReplay: false,
       isRecording: false
     },
+    originalAudioMixPercent: DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
+    sourceMediaResumeDelaySeconds: DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
     startedAt: null,
     statusMessage: DEFAULT_STATUS_MESSAGE,
     tabId,
@@ -469,6 +543,11 @@ function createSessionState(tabId) {
 }
 
 function clearSessionRuntime(sessionState) {
+  finalizeCostRun(sessionState.tabId);
+  if (sessionState.pendingResumeTimeoutId) {
+    clearTimeout(sessionState.pendingResumeTimeoutId);
+    sessionState.pendingResumeTimeoutId = null;
+  }
   sessionState.activeSession = false;
   sessionState.awaitingTranslatedAudioStart = false;
   sessionState.didPauseSourceMedia = false;
@@ -502,10 +581,14 @@ function clearSessionTranscripts(tabId) {
 function buildSessionSnapshot(sessionState) {
   return {
     activeSession: sessionState.activeSession,
+    estimatedCostMs: getTotalEstimatedCostMs(),
     isStarting: startingTabs.has(sessionState.tabId),
     isStopping: stoppingTabs.has(sessionState.tabId),
+    originalAudioMixPercent: sessionState.originalAudioMixPercent,
     phase: sessionState.phase,
     replay: { ...sessionState.replay },
+    sourceMediaResumeDelaySeconds: sessionState.sourceMediaResumeDelaySeconds,
+    startedAt: sessionState.startedAt,
     statusMessage: sessionState.statusMessage,
     tabId: sessionState.tabId,
     targetLanguage: sessionState.targetLanguage,
@@ -608,4 +691,54 @@ function normalizeWhitespace(text) {
   return String(text || "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeSourceMediaResumeDelaySeconds(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS;
+  }
+
+  return Math.min(30, Math.max(0, Math.round(numericValue)));
+}
+
+function getSourceMediaResumeDelayMs(sessionState) {
+  return normalizeSourceMediaResumeDelaySeconds(sessionState.sourceMediaResumeDelaySeconds) * 1000;
+}
+
+function normalizeOriginalAudioMixPercent(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(numericValue)));
+}
+
+function startCostRun(tabId, startedAt) {
+  if (!tabId || !startedAt || extensionCostTracker.activeRuns.has(tabId)) {
+    return;
+  }
+
+  extensionCostTracker.activeRuns.set(tabId, startedAt);
+}
+
+function finalizeCostRun(tabId) {
+  if (!tabId || !extensionCostTracker.activeRuns.has(tabId)) {
+    return;
+  }
+
+  const startedAt = extensionCostTracker.activeRuns.get(tabId);
+  extensionCostTracker.accumulatedMs += Math.max(0, Date.now() - startedAt);
+  extensionCostTracker.activeRuns.delete(tabId);
+}
+
+function getTotalEstimatedCostMs() {
+  let totalMs = extensionCostTracker.accumulatedMs;
+
+  for (const startedAt of extensionCostTracker.activeRuns.values()) {
+    totalMs += Math.max(0, Date.now() - startedAt);
+  }
+
+  return totalMs;
 }
