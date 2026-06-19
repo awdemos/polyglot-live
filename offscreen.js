@@ -12,6 +12,11 @@ let mediaStream = null;
 let sourceNode = null;
 let processorNode = null;
 let passThroughGain = null;
+let replayCaptureDestination = null;
+let replayRecorder = null;
+let replayRecorderChunks = [];
+let replayRecordingBlob = null;
+let replayRecordingMimeType = "";
 let session = null;
 let pendingPcm16 = new Int16Array(0);
 let playbackCursorTime = 0;
@@ -29,6 +34,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
+  }
+
+  if (message?.type === "OFFSCREEN_RECORD_START") {
+    startReplayRecording()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "OFFSCREEN_RECORD_STOP") {
+    stopReplayRecording()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "OFFSCREEN_RECORD_EXPORT") {
+    exportReplayRecording()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "OFFSCREEN_RECORD_STATE") {
+    sendResponse({
+      ok: true,
+      hasReplay: Boolean(replayRecordingBlob),
+      isRecording: replayRecorder?.state === "recording",
+      mimeType: replayRecordingMimeType || null
+    });
+    return false;
   }
 
   return false;
@@ -65,6 +101,7 @@ async function startPipeline({ streamId, targetLanguage, passThroughOriginalAudi
   audioContext = new AudioContext({ sampleRate: 48000 });
   emitDebug("Audio context created", { sampleRate: audioContext.sampleRate });
   await audioContext.audioWorklet.addModule("offscreen-audio-processor.js");
+  replayCaptureDestination = audioContext.createMediaStreamDestination();
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   processorNode = new AudioWorkletNode(audioContext, "polyglot-live-capture-processor", {
     numberOfInputs: 1,
@@ -217,6 +254,15 @@ class GeminiTranslateSession {
     this.setupTimeoutId = null;
     this.hasEmittedTranslatedAudioStart = false;
   }
+
+  if (replayRecorder?.state === "recording") {
+    await stopReplayRecording();
+  }
+
+  replayRecorder = null;
+  replayRecorderChunks = [];
+  replayRecordingMimeType = "";
+  replayCaptureDestination = null;
 
   async connect() {
     this.closedByClient = false;
@@ -699,10 +745,114 @@ function playTranslatedAudio(base64Audio) {
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
   source.connect(audioContext.destination);
+  if (replayCaptureDestination) {
+    source.connect(replayCaptureDestination);
+  }
 
   const startTime = Math.max(audioContext.currentTime + 0.02, playbackCursorTime);
   source.start(startTime);
   playbackCursorTime = startTime + audioBuffer.duration;
+}
+
+async function startReplayRecording() {
+  if (!audioContext || !replayCaptureDestination) {
+    throw new Error("Start translation before starting a replay recording.");
+  }
+
+  if (replayRecorder?.state === "recording") {
+    throw new Error("Replay recording is already in progress.");
+  }
+
+  replayRecordingMimeType = pickReplayRecordingMimeType();
+  if (!replayRecordingMimeType) {
+    throw new Error("This browser does not support WebM audio recording.");
+  }
+
+  replayRecordingBlob = null;
+  replayRecorderChunks = [];
+  replayRecorder = new MediaRecorder(replayCaptureDestination.stream, {
+    mimeType: replayRecordingMimeType
+  });
+  replayRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      replayRecorderChunks.push(event.data);
+    }
+  };
+  replayRecorder.start(1000);
+  emitDebug("Replay recording started", { mimeType: replayRecordingMimeType });
+  return {
+    hasReplay: false,
+    isRecording: true,
+    mimeType: replayRecordingMimeType
+  };
+}
+
+async function stopReplayRecording() {
+  if (!replayRecorder || replayRecorder.state !== "recording") {
+    return {
+      hasReplay: Boolean(replayRecordingBlob),
+      isRecording: false,
+      mimeType: replayRecordingMimeType || null
+    };
+  }
+
+  const recorder = replayRecorder;
+  await new Promise((resolve) => {
+    recorder.addEventListener(
+      "stop",
+      () => {
+        replayRecordingBlob = new Blob(replayRecorderChunks, {
+          type: replayRecordingMimeType || "audio/webm"
+        });
+        replayRecorderChunks = [];
+        resolve();
+      },
+      { once: true }
+    );
+    recorder.stop();
+  });
+  emitDebug("Replay recording stopped", {
+    byteLength: replayRecordingBlob?.size || 0,
+    mimeType: replayRecordingMimeType || null
+  });
+  return {
+    hasReplay: Boolean(replayRecordingBlob && replayRecordingBlob.size > 0),
+    isRecording: false,
+    mimeType: replayRecordingMimeType || null
+  };
+}
+
+async function exportReplayRecording() {
+  if (replayRecorder?.state === "recording") {
+    throw new Error("Stop recording before saving the replay.");
+  }
+
+  if (!replayRecordingBlob || replayRecordingBlob.size === 0) {
+    throw new Error("No replay recording is available yet.");
+  }
+
+  const buffer = await replayRecordingBlob.arrayBuffer();
+  return {
+    bytes: Array.from(new Uint8Array(buffer)),
+    extension: "webm",
+    fileName: `polyglot-live_replay_${buildTimestampForFile(new Date())}.webm`,
+    mimeType: replayRecordingMimeType || replayRecordingBlob.type || "audio/webm"
+  };
+}
+
+function pickReplayRecordingMimeType() {
+  const candidates = ["audio/webm;codecs=opus", "audio/webm"];
+  return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
+}
+
+function buildTimestampForFile(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day}_${hours}${minutes}${seconds}`;
 }
 
 function estimateTranslatedAudioDurationMs(base64Audio) {

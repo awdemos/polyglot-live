@@ -27,12 +27,21 @@
           <button id="startButton" type="button">Start</button>
           <button id="stopButton" type="button" class="secondary">Stop</button>
         </div>
+        <div class="recording-actions">
+          <button id="startRecordingButton" type="button" class="toolbar-button">Start recording</button>
+          <button id="stopRecordingButton" type="button" class="toolbar-button">Stop recording</button>
+          <button id="saveReplayButton" type="button" class="toolbar-button">Save replay</button>
+        </div>
+        <p id="recordingMessage" class="hint">Replay recording captures translated audio as WebM for later playback.</p>
       </section>
 
       <section class="card transcript-shell">
         <div class="status-head">
           <h2>Live Text</h2>
-          <span class="muted">collapsible panes</span>
+          <div class="transcript-toolbar">
+            <span class="muted">collapsible panes</span>
+            <button id="saveTranscriptButton" type="button" class="toolbar-button">Export transcripts</button>
+          </div>
         </div>
         <div class="transcript-grid">
           <details class="transcript-accordion" open>

@@ -6,11 +6,16 @@ import {
 const targetLanguageInput = document.querySelector("#targetLanguage");
 const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
+const startRecordingButton = document.querySelector("#startRecordingButton");
+const stopRecordingButton = document.querySelector("#stopRecordingButton");
+const saveReplayButton = document.querySelector("#saveReplayButton");
+const recordingMessage = document.querySelector("#recordingMessage");
 const statusMessage = document.querySelector("#statusMessage");
 const phaseBadge = document.querySelector("#phaseBadge");
 const translatedPaneTitle = document.querySelector("#translatedPaneTitle");
 const originalTranscriptOutput = document.querySelector("#originalTranscriptOutput");
 const translatedTranscriptOutput = document.querySelector("#translatedTranscriptOutput");
+const saveTranscriptButton = document.querySelector("#saveTranscriptButton");
 const tokenEndpointInput = document.querySelector("#tokenEndpoint");
 const tokenSecretInput = document.querySelector("#tokenSecret");
 const checkAuthButton = document.querySelector("#checkAuthButton");
@@ -21,6 +26,8 @@ let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
 let activeHighlightTimeoutId = null;
 let lastStartedTargetLanguage = null;
+let replayHasSavedCapture = false;
+let replayIsRecording = false;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 
@@ -36,6 +43,66 @@ themeToggleButton.addEventListener("click", async () => {
   const nextTheme = document.body.dataset.theme === "dark" ? "light" : "dark";
   applyTheme(nextTheme);
   await chrome.storage.local.set({ panelTheme: nextTheme });
+});
+
+saveTranscriptButton.addEventListener("click", () => {
+  exportTranscripts();
+});
+
+startRecordingButton.addEventListener("click", async () => {
+  const response = await chrome.runtime.sendMessage({ type: "START_REPLAY_RECORDING" });
+  if (!response?.ok) {
+    updateRecordingMessage(response?.error ?? "Unable to start replay recording.");
+    await syncReplayRecordingState();
+    return;
+  }
+
+  replayIsRecording = true;
+  replayHasSavedCapture = false;
+  updateRecordingMessage("Recording translated audio to WebM...");
+  syncRecordingButtonsForState();
+});
+
+stopRecordingButton.addEventListener("click", async () => {
+  const response = await chrome.runtime.sendMessage({ type: "STOP_REPLAY_RECORDING" });
+  if (!response?.ok) {
+    updateRecordingMessage(response?.error ?? "Unable to stop replay recording.");
+    await syncReplayRecordingState();
+    return;
+  }
+
+  replayIsRecording = false;
+  replayHasSavedCapture = Boolean(response?.hasReplay);
+  updateRecordingMessage(
+    replayHasSavedCapture
+      ? "Replay captured. Press Save replay to download the WebM file."
+      : "Recording stopped, but no replay audio was captured."
+  );
+  syncRecordingButtonsForState();
+});
+
+saveReplayButton.addEventListener("click", async () => {
+  const response = await chrome.runtime.sendMessage({ type: "EXPORT_REPLAY_RECORDING" });
+  if (!response?.ok) {
+    updateRecordingMessage(response?.error ?? "Unable to save replay.");
+    await syncReplayRecordingState();
+    return;
+  }
+
+  const bytes = new Uint8Array(response.bytes || []);
+  const blob = new Blob([bytes], { type: response.mimeType || "audio/webm" });
+  const objectUrl = URL.createObjectURL(blob);
+  const downloadLink = document.createElement("a");
+  downloadLink.href = objectUrl;
+  downloadLink.download =
+    response.fileName || `polyglot-live_replay_${buildFileTimestamp(new Date())}.${response.extension || "webm"}`;
+  document.body.appendChild(downloadLink);
+  downloadLink.click();
+  downloadLink.remove();
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
+  updateRecordingMessage("Replay saved.");
 });
 
 startButton.addEventListener("click", async () => {
@@ -160,7 +227,9 @@ async function initialize() {
   });
 
   updateAuthMessage("Not checked yet.");
+  updateRecordingMessage("Replay recording captures translated audio as WebM for later playback.");
   resetTranscriptOutputs();
+  await syncReplayRecordingState();
   await syncSessionState();
 }
 
@@ -244,6 +313,48 @@ function applyTheme(theme) {
 
 function updateAuthMessage(message) {
   authMessage.textContent = message;
+}
+
+function updateRecordingMessage(message) {
+  recordingMessage.textContent = message;
+}
+
+function exportTranscripts() {
+  const targetLanguageLabel = getSelectedTargetLanguageLabel();
+  const originalText = normalizeExportText(
+    isPlaceholderText(originalTranscriptOutput.textContent) ? "" : originalTranscriptOutput.textContent
+  );
+  const translatedText = normalizeExportText(
+    translatedTranscriptOutput.classList.contains("translated-transcript-empty")
+      ? ""
+      : translatedTranscriptOutput.textContent
+  );
+  const exportedAt = new Date();
+  const content = [
+    "polyglot-live transcript export",
+    `Exported: ${exportedAt.toLocaleString()}`,
+    `Target language: ${targetLanguageLabel}`,
+    `Status: ${phaseBadge.textContent || "idle"}`,
+    "",
+    "Original",
+    originalText || "(empty)",
+    "",
+    targetLanguageLabel,
+    translatedText || "(empty)",
+    ""
+  ].join("\n");
+
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
+  const downloadLink = document.createElement("a");
+  downloadLink.href = objectUrl;
+  downloadLink.download = `polyglot-live_transcripts_${buildFileTimestamp(exportedAt)}.txt`;
+  document.body.appendChild(downloadLink);
+  downloadLink.click();
+  downloadLink.remove();
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
 }
 
 function resetTranscriptOutputs() {
@@ -539,6 +650,23 @@ function normalizeWhitespace(text) {
     .trim();
 }
 
+function normalizeExportText(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function buildFileTimestamp(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day}_${hours}${minutes}${seconds}`;
+}
+
 function renderTargetLanguageOptions() {
   const optionsMarkup = SUPPORTED_TRANSLATION_LANGUAGES.map(
     ({ code, label }) => `<option value="${code}">${label}</option>`
@@ -584,6 +712,20 @@ async function syncSessionState() {
   updateStatus(response.phase || "idle", response.statusMessage || "Ready to start a translation session.");
 }
 
+async function syncReplayRecordingState() {
+  const response = await chrome.runtime.sendMessage({ type: "GET_REPLAY_RECORDING_STATE" });
+  if (!response?.ok) {
+    replayIsRecording = false;
+    replayHasSavedCapture = false;
+    syncRecordingButtonsForState();
+    return;
+  }
+
+  replayIsRecording = Boolean(response.isRecording);
+  replayHasSavedCapture = Boolean(response.hasReplay);
+  syncRecordingButtonsForState();
+}
+
 function syncButtonsForPhase(phase) {
   const isStarting =
     phase === "starting" ||
@@ -595,6 +737,17 @@ function syncButtonsForPhase(phase) {
 
   startButton.disabled = isStarting || isRunning;
   stopButton.disabled = !(isStarting || isRunning);
+  syncRecordingButtonsForState();
+}
+
+function syncRecordingButtonsForState() {
+  const phase = phaseBadge.textContent || "idle";
+  const canStartReplayRecording =
+    !replayIsRecording &&
+    (phase === "running" || phase === "streaming" || phase === "connecting" || phase === "starting");
+  startRecordingButton.disabled = !canStartReplayRecording;
+  stopRecordingButton.disabled = !replayIsRecording;
+  saveReplayButton.disabled = replayIsRecording || !replayHasSavedCapture;
 }
 
 function syncPollingForPhase(phase) {

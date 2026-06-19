@@ -50,6 +50,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "START_REPLAY_RECORDING") {
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_START" })
+      .then((payload) => sendResponse(payload))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "STOP_REPLAY_RECORDING") {
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STOP" })
+      .then((payload) => sendResponse(payload))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "EXPORT_REPLAY_RECORDING") {
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT" })
+      .then((payload) => sendResponse(payload))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "GET_REPLAY_RECORDING_STATE") {
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE" })
+      .then((payload) => sendResponse(payload))
+      .catch((error) => sendResponse({ ok: true, hasReplay: false, isRecording: false }));
+    return true;
+  }
+
   if (message.type === "GET_SESSION_STATE") {
     sendResponse({
       ok: true,
@@ -268,6 +296,12 @@ function updateSessionState(phase, message) {
       message
     }
   });
+}
+
+async function forwardToOffscreen(message) {
+  await ensureOffscreenDocument();
+  const response = await chrome.runtime.sendMessage(message);
+  return response || { ok: false, error: "Offscreen document did not respond." };
 }
 
 async function createContextMenu() {
