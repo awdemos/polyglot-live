@@ -10,11 +10,14 @@ const startRecordingButton = document.querySelector("#startRecordingButton");
 const stopRecordingButton = document.querySelector("#stopRecordingButton");
 const saveReplayButton = document.querySelector("#saveReplayButton");
 const recordingMessage = document.querySelector("#recordingMessage");
+const recordingIndicator = document.querySelector("#recordingIndicator");
+const recordingLabel = document.querySelector(".recording-label");
 const statusMessage = document.querySelector("#statusMessage");
 const phaseBadge = document.querySelector("#phaseBadge");
 const translatedPaneTitle = document.querySelector("#translatedPaneTitle");
 const originalTranscriptOutput = document.querySelector("#originalTranscriptOutput");
 const translatedTranscriptOutput = document.querySelector("#translatedTranscriptOutput");
+const clearTranscriptButton = document.querySelector("#clearTranscriptButton");
 const saveTranscriptButton = document.querySelector("#saveTranscriptButton");
 const tokenEndpointInput = document.querySelector("#tokenEndpoint");
 const tokenSecretInput = document.querySelector("#tokenSecret");
@@ -47,6 +50,22 @@ themeToggleButton.addEventListener("click", async () => {
 
 saveTranscriptButton.addEventListener("click", () => {
   exportTranscripts();
+});
+
+clearTranscriptButton.addEventListener("click", () => {
+  resetTranscriptOutputs();
+
+  if (phaseBadge.textContent === "running") {
+    updateStatus("running", `Transcript panes cleared. Receiving translated audio for ${getSelectedTargetLanguageCode()}.`);
+    return;
+  }
+
+  if (phaseBadge.textContent === "idle") {
+    updateStatus("idle", "Transcript panes cleared.");
+    return;
+  }
+
+  statusMessage.textContent = "Transcript panes cleared.";
 });
 
 startRecordingButton.addEventListener("click", async () => {
@@ -317,6 +336,12 @@ function updateAuthMessage(message) {
 
 function updateRecordingMessage(message) {
   recordingMessage.textContent = message;
+}
+
+function updateRecordingIndicator() {
+  const isRecording = replayIsRecording;
+  recordingIndicator.classList.toggle("is-recording", isRecording);
+  recordingLabel.textContent = isRecording ? "recording" : replayHasSavedCapture ? "saved" : "idle";
 }
 
 function exportTranscripts() {
@@ -717,12 +742,14 @@ async function syncReplayRecordingState() {
   if (!response?.ok) {
     replayIsRecording = false;
     replayHasSavedCapture = false;
+    updateRecordingIndicator();
     syncRecordingButtonsForState();
     return;
   }
 
   replayIsRecording = Boolean(response.isRecording);
   replayHasSavedCapture = Boolean(response.hasReplay);
+  updateRecordingIndicator();
   syncRecordingButtonsForState();
 }
 
@@ -748,6 +775,7 @@ function syncRecordingButtonsForState() {
   startRecordingButton.disabled = !canStartReplayRecording;
   stopRecordingButton.disabled = !replayIsRecording;
   saveReplayButton.disabled = replayIsRecording || !replayHasSavedCapture;
+  updateRecordingIndicator();
 }
 
 function syncPollingForPhase(phase) {

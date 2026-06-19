@@ -164,6 +164,16 @@ async function stopPipeline() {
     session = null;
   }
 
+  if (replayRecorder?.state === "recording") {
+    await stopReplayRecording();
+  }
+
+  replayRecorder = null;
+  replayRecorderChunks = [];
+  replayRecordingBlob = null;
+  replayRecordingMimeType = "";
+  replayCaptureDestination = null;
+
   pendingPcm16 = new Int16Array(0);
   playbackCursorTime = 0;
 }
@@ -254,15 +264,6 @@ class GeminiTranslateSession {
     this.setupTimeoutId = null;
     this.hasEmittedTranslatedAudioStart = false;
   }
-
-  if (replayRecorder?.state === "recording") {
-    await stopReplayRecording();
-  }
-
-  replayRecorder = null;
-  replayRecorderChunks = [];
-  replayRecordingMimeType = "";
-  replayCaptureDestination = null;
 
   async connect() {
     this.closedByClient = false;
