@@ -15,11 +15,14 @@ const tokenEndpointInput = document.querySelector("#tokenEndpoint");
 const tokenSecretInput = document.querySelector("#tokenSecret");
 const checkAuthButton = document.querySelector("#checkAuthButton");
 const authMessage = document.querySelector("#authMessage");
+const themeToggleButton = document.querySelector("#themeToggleButton");
 let sessionPollId = null;
 let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
 let activeHighlightTimeoutId = null;
 let lastStartedTargetLanguage = null;
+const ENABLE_WORD_HIGHLIGHTING = false;
+const DEFAULT_THEME = "light";
 
 initialize().catch((error) => {
   updateStatus("error", error.message);
@@ -27,6 +30,12 @@ initialize().catch((error) => {
 
 checkAuthButton.addEventListener("click", async () => {
   await runReadinessCheck();
+});
+
+themeToggleButton.addEventListener("click", async () => {
+  const nextTheme = document.body.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(nextTheme);
+  await chrome.storage.local.set({ panelTheme: nextTheme });
 });
 
 startButton.addEventListener("click", async () => {
@@ -124,12 +133,14 @@ function updateStatus(phase, message) {
 }
 
 async function initialize() {
-  const { authConfig = {}, translationPrefs = {} } = await chrome.storage.local.get([
+  const { authConfig = {}, panelTheme = DEFAULT_THEME, translationPrefs = {} } = await chrome.storage.local.get([
     "authConfig",
+    "panelTheme",
     "translationPrefs"
   ]);
   tokenEndpointInput.value = authConfig.tokenEndpoint || DEFAULT_TOKEN_ENDPOINT;
   tokenSecretInput.value = authConfig.tokenSecret || "";
+  applyTheme(panelTheme);
   renderTargetLanguageOptions();
   targetLanguageInput.value = normalizeTargetLanguageCode(translationPrefs.targetLanguage);
   updateTargetLanguagePresentation(targetLanguageInput.value);
@@ -225,6 +236,12 @@ function buildProbeUrl(tokenEndpoint) {
   return tokenEndpoint;
 }
 
+function applyTheme(theme) {
+  const resolvedTheme = theme === "dark" ? "dark" : DEFAULT_THEME;
+  document.body.dataset.theme = resolvedTheme;
+  themeToggleButton.textContent = resolvedTheme === "dark" ? "Light theme" : "Dark theme";
+}
+
 function updateAuthMessage(message) {
   authMessage.textContent = message;
 }
@@ -262,24 +279,37 @@ function appendTranscript(payload) {
 
 function appendOriginalTranscript(text) {
   const normalizedText = text.trim();
-  const lastLine = getLastTranscriptLine(originalTranscriptOutput.textContent);
+  const existingText = isPlaceholderText(originalTranscriptOutput.textContent)
+    ? ""
+    : originalTranscriptOutput.textContent.trim();
+  const mergedText = mergeTranscriptText(existingText, normalizedText);
 
-  if (!normalizedText || lastLine === normalizedText) {
+  if (!mergedText || mergedText === existingText) {
     return;
   }
 
   if (isPlaceholderText(originalTranscriptOutput.textContent)) {
-    originalTranscriptOutput.textContent = normalizedText;
+    originalTranscriptOutput.textContent = mergedText;
   } else {
-    originalTranscriptOutput.textContent = `${originalTranscriptOutput.textContent} ${normalizedText}`;
+    originalTranscriptOutput.textContent = mergedText;
   }
 
   originalTranscriptOutput.scrollTop = originalTranscriptOutput.scrollHeight;
 }
 
 function appendTranslatedTranscript(text) {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    return;
+  }
+
+  if (!ENABLE_WORD_HIGHLIGHTING) {
+    appendTranslatedTranscriptPlain(normalizedText);
+    return;
+  }
+
   const lastSegment = translatedSegments[translatedSegments.length - 1];
-  if (lastSegment?.text === text) {
+  if (lastSegment?.text === normalizedText) {
     return;
   }
 
@@ -290,7 +320,7 @@ function appendTranslatedTranscript(text) {
 
   const segmentElement = document.createElement("div");
   segmentElement.className = "translated-segment";
-  const words = text.split(/\s+/).filter(Boolean);
+  const words = normalizedText.split(/\s+/).filter(Boolean);
   const wordElements = words.map((word) => {
     const wordElement = document.createElement("span");
     wordElement.className = "translated-word";
@@ -304,7 +334,7 @@ function appendTranslatedTranscript(text) {
   translatedTranscriptOutput.scrollTop = translatedTranscriptOutput.scrollHeight;
 
   translatedSegments.push({
-    text,
+    text: normalizedText,
     words,
     wordElements,
     spokenWordCount: 0,
@@ -319,7 +349,31 @@ function appendTranslatedTranscript(text) {
   scheduleTranslatedHighlightProgress();
 }
 
+function appendTranslatedTranscriptPlain(text) {
+  const existingText = translatedTranscriptOutput.classList.contains("translated-transcript-empty")
+    ? ""
+    : translatedTranscriptOutput.textContent.trim();
+  const mergedText = mergeTranscriptText(existingText, text);
+
+  if (!mergedText || mergedText === existingText) {
+    return;
+  }
+
+  if (translatedTranscriptOutput.classList.contains("translated-transcript-empty")) {
+    translatedTranscriptOutput.textContent = mergedText;
+    translatedTranscriptOutput.className = "";
+  } else {
+    translatedTranscriptOutput.textContent = mergedText;
+  }
+
+  translatedTranscriptOutput.scrollTop = translatedTranscriptOutput.scrollHeight;
+}
+
 function applyTranslatedAudioTiming(payload) {
+  if (!ENABLE_WORD_HIGHLIGHTING) {
+    return;
+  }
+
   const durationMs = Math.max(0, Number(payload?.durationMs || 0));
   if (!durationMs) {
     return;
@@ -352,6 +406,10 @@ function assignAudioMsToSegments(durationMs) {
 }
 
 function scheduleTranslatedHighlightProgress() {
+  if (!ENABLE_WORD_HIGHLIGHTING) {
+    return;
+  }
+
   if (activeHighlightTimeoutId) {
     return;
   }
@@ -438,6 +496,47 @@ function getLastTranscriptLine(text) {
     .filter(Boolean);
 
   return lines.length > 0 ? lines[lines.length - 1] : "";
+}
+
+function mergeTranscriptText(existingText, incomingText) {
+  const normalizedExisting = normalizeWhitespace(existingText);
+  const normalizedIncoming = normalizeWhitespace(incomingText);
+
+  if (!normalizedExisting) {
+    return normalizedIncoming;
+  }
+
+  if (!normalizedIncoming || normalizedExisting === normalizedIncoming) {
+    return normalizedExisting;
+  }
+
+  if (normalizedExisting.endsWith(normalizedIncoming)) {
+    return normalizedExisting;
+  }
+
+  if (normalizedIncoming.startsWith(normalizedExisting)) {
+    return normalizedIncoming;
+  }
+
+  const existingWords = normalizedExisting.split(" ");
+  const incomingWords = normalizedIncoming.split(" ");
+  const maxOverlap = Math.min(existingWords.length, incomingWords.length);
+
+  for (let overlapLength = maxOverlap; overlapLength > 0; overlapLength -= 1) {
+    const existingTail = existingWords.slice(-overlapLength).join(" ");
+    const incomingHead = incomingWords.slice(0, overlapLength).join(" ");
+    if (existingTail === incomingHead) {
+      return `${normalizedExisting} ${incomingWords.slice(overlapLength).join(" ")}`.trim();
+    }
+  }
+
+  return `${normalizedExisting} ${normalizedIncoming}`.trim();
+}
+
+function normalizeWhitespace(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function renderTargetLanguageOptions() {

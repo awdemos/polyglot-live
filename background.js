@@ -67,6 +67,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       state.phase = message.payload.phase || state.phase;
       state.statusMessage = message.payload.message || state.statusMessage;
     }
+    if (message.event === "translated_audio_started") {
+      void resumePausedTabMedia();
+    }
     broadcastToViews(message);
     sendResponse({ ok: true });
     return false;
@@ -144,10 +147,17 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
 
     state.activeSession = {
       authConfig,
+      awaitingTranslatedAudioStart: false,
+      didPauseSourceMedia: false,
       startedAt: Date.now(),
       tabId,
       targetLanguage: translationPrefs.targetLanguage
     };
+
+    const pauseResult = await pauseTabMedia(tabId);
+    state.activeSession.didPauseSourceMedia = pauseResult.didPausePlayback;
+    state.activeSession.awaitingTranslatedAudioStart = pauseResult.didPausePlayback;
+    console.info("[polyglot-live/background] source media pause result", pauseResult);
 
     const offscreenResponse = await chrome.runtime.sendMessage({
       type: "OFFSCREEN_START",
@@ -161,6 +171,9 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     });
 
     if (!offscreenResponse?.ok) {
+      if (state.activeSession?.didPauseSourceMedia) {
+        await resumePausedTabMedia();
+      }
       state.activeSession = null;
       console.error("[polyglot-live/background] offscreen start failed", offscreenResponse);
       throw new Error(offscreenResponse?.error || "Offscreen pipeline failed to start.");
@@ -202,6 +215,7 @@ async function stopTranslation() {
       return { ok: false };
     });
   } finally {
+    await resumePausedTabMedia();
     state.activeSession = null;
     state.isStopping = false;
   }
@@ -264,4 +278,93 @@ async function createContextMenu() {
     id: CONTEXT_MENU_ID,
     title: "Open polyglot-live for this tab"
   });
+}
+
+async function pauseTabMedia(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { allFrames: true, tabId },
+      func: pauseMediaElementsForPolyglot
+    });
+    const pausedCount = results.reduce((sum, frame) => sum + Number(frame.result?.pausedCount || 0), 0);
+    const scannedCount = results.reduce((sum, frame) => sum + Number(frame.result?.scannedCount || 0), 0);
+    return {
+      didPausePlayback: pausedCount > 0,
+      pausedCount,
+      scannedCount
+    };
+  } catch (error) {
+    console.warn("[polyglot-live/background] unable to pause source media", error);
+    return {
+      didPausePlayback: false,
+      pausedCount: 0,
+      scannedCount: 0
+    };
+  }
+}
+
+async function resumePausedTabMedia() {
+  if (!state.activeSession?.tabId || !state.activeSession?.didPauseSourceMedia) {
+    return;
+  }
+
+  const tabId = state.activeSession.tabId;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { allFrames: true, tabId },
+      func: resumeMediaElementsForPolyglot
+    });
+    const resumedCount = results.reduce((sum, frame) => sum + Number(frame.result?.resumedCount || 0), 0);
+    console.info("[polyglot-live/background] source media resume result", { resumedCount, tabId });
+  } catch (error) {
+    console.warn("[polyglot-live/background] unable to resume source media", error);
+  } finally {
+    if (state.activeSession) {
+      state.activeSession.awaitingTranslatedAudioStart = false;
+      state.activeSession.didPauseSourceMedia = false;
+    }
+  }
+}
+
+function pauseMediaElementsForPolyglot() {
+  const mediaElements = Array.from(document.querySelectorAll("audio, video"));
+  let pausedCount = 0;
+
+  for (const element of mediaElements) {
+    if (!element.paused && !element.ended) {
+      element.dataset.polyglotLiveResume = "1";
+      element.pause();
+      pausedCount += 1;
+      continue;
+    }
+
+    delete element.dataset.polyglotLiveResume;
+  }
+
+  return {
+    pausedCount,
+    scannedCount: mediaElements.length
+  };
+}
+
+function resumeMediaElementsForPolyglot() {
+  const mediaElements = Array.from(document.querySelectorAll("audio, video"));
+  let resumedCount = 0;
+
+  for (const element of mediaElements) {
+    if (element.dataset.polyglotLiveResume === "1") {
+      delete element.dataset.polyglotLiveResume;
+      const playAttempt = element.play?.();
+      if (playAttempt && typeof playAttempt.catch === "function") {
+        playAttempt.catch(() => {
+          return undefined;
+        });
+      }
+      resumedCount += 1;
+    }
+  }
+
+  return {
+    resumedCount
+  };
 }

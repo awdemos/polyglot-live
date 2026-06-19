@@ -8,6 +8,7 @@
     "contextMenus",
     "offscreen",
     "sidePanel",
+    "scripting",
     "storage",
     "tabCapture",
     "tabs"

@@ -215,6 +215,7 @@ class GeminiTranslateSession {
     this.rawChunksObserved = 0;
     this.didCompleteSetup = false;
     this.setupTimeoutId = null;
+    this.hasEmittedTranslatedAudioStart = false;
   }
 
   async connect() {
@@ -578,6 +579,17 @@ class GeminiTranslateSession {
           base64Length: part.inlineData.data.length,
           mimeType: part.inlineData.mimeType || null
         });
+        if (!this.hasEmittedTranslatedAudioStart) {
+          this.hasEmittedTranslatedAudioStart = true;
+          chrome.runtime.sendMessage({
+            type: "SESSION_EVENT",
+            event: "translated_audio_started",
+            payload: {
+              targetLanguage: this.targetLanguage
+            }
+          });
+          emitDebug("First translated audio packet received");
+        }
         chrome.runtime.sendMessage({
           type: "SESSION_EVENT",
           event: "audio_timing",
