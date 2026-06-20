@@ -29,41 +29,47 @@
         </div>
       </header>
 
-      <section class="card">
-        <label class="field">
-          <span>Input source</span>
-          <select id="inputSource"></select>
-        </label>
+      <details class="accordion card controls-accordion" open>
+        <summary class="accordion-summary">
+          <span>Translation Controls</span>
+          <span class="muted">source, language, mix</span>
+        </summary>
+        <div class="accordion-body controls-body">
+          <label class="field">
+            <span>Input source</span>
+            <select id="inputSource"></select>
+          </label>
 
-        <details id="microphoneAccessControls" class="inline-accordion" hidden>
-          <summary class="inline-accordion-summary">
-            <span>Microphone Access</span>
-            <span class="muted">permission check</span>
-          </summary>
-          <div class="inline-accordion-body">
-            <button id="grantMicrophoneAccessButton" type="button" class="toolbar-button">Grant microphone access</button>
-            <p id="microphoneAccessMessage" class="hint">Microphone mode needs one-time browser permission from this panel.</p>
+          <details id="microphoneAccessControls" class="inline-accordion" hidden>
+            <summary class="inline-accordion-summary">
+              <span>Microphone Access</span>
+              <span class="muted">permission check</span>
+            </summary>
+            <div class="inline-accordion-body">
+              <button id="grantMicrophoneAccessButton" type="button" class="toolbar-button">Grant microphone access</button>
+              <p id="microphoneAccessMessage" class="hint">Microphone mode needs one-time browser permission from this panel.</p>
+            </div>
+          </details>
+
+          <label class="field">
+            <span>Target language</span>
+            <select id="targetLanguage"></select>
+          </label>
+
+          <label class="field">
+            <span>Original audio mix</span>
+            <div class="range-field">
+              <input id="originalAudioMixPercent" type="range" min="0" max="100" step="1">
+              <span id="originalAudioMixPercentValue" class="range-value">0%</span>
+            </div>
+          </label>
+
+          <div class="actions">
+            <button id="startButton" type="button">Start</button>
+            <button id="stopButton" type="button" class="secondary">Stop</button>
           </div>
-        </details>
-
-        <label class="field">
-          <span>Target language</span>
-          <select id="targetLanguage"></select>
-        </label>
-
-        <label class="field">
-          <span>Original audio mix</span>
-          <div class="range-field">
-            <input id="originalAudioMixPercent" type="range" min="0" max="100" step="1">
-            <span id="originalAudioMixPercentValue" class="range-value">0%</span>
-          </div>
-        </label>
-
-        <div class="actions">
-          <button id="startButton" type="button">Start</button>
-          <button id="stopButton" type="button" class="secondary">Stop</button>
         </div>
-      </section>
+      </details>
 
       <section class="card transcript-shell">
         <div class="status-head">

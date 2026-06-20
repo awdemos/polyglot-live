@@ -207,6 +207,10 @@ h1 {
   padding-bottom: 12px;
 }
 
+.controls-body {
+  padding-top: 14px;
+}
+
 .field,
 .checkbox {
   display: block;
