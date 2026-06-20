@@ -86,6 +86,51 @@ h1 {
   line-height: 1;
 }
 
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.build-version {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.mic-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mic-indicator[hidden] {
+  display: none;
+}
+
+.mic-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: recording-pulse 1s ease-in-out infinite;
+}
+
+[data-theme="dark"] .mic-indicator {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fca5a5;
+}
+
 .lede {
   margin-top: 10px;
   color: var(--muted);
@@ -243,6 +288,62 @@ select {
 
 .auth-actions {
   margin-top: 16px;
+}
+
+.mic-access-controls {
+  margin-top: 14px;
+}
+
+.mic-access-controls .toolbar-button {
+  min-width: 0;
+}
+
+.inline-accordion {
+  margin-top: 14px;
+  border: 1px solid rgba(217, 205, 191, 0.8);
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+[data-theme="dark"] .inline-accordion {
+  border-color: rgba(77, 64, 51, 0.8);
+}
+
+.inline-accordion-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+
+.inline-accordion-summary::-webkit-details-marker {
+  display: none;
+}
+
+.inline-accordion-summary::after {
+  content: "+";
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.inline-accordion[open] .inline-accordion-summary::after {
+  content: "-";
+}
+
+.inline-accordion-body {
+  padding: 0 14px 14px;
+  border-top: 1px solid rgba(217, 205, 191, 0.8);
+}
+
+[data-theme="dark"] .inline-accordion-body {
+  border-top-color: rgba(77, 64, 51, 0.8);
 }
 
 button {

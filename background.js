@@ -1,4 +1,5 @@
 import {
+  DEFAULT_INPUT_SOURCE,
   DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
   DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
   DEFAULT_TARGET_LANGUAGE_CODE,
@@ -136,12 +137,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "SESSION_DEBUG") {
-    console.info(
-      "[polyglot-live/offscreen->background]",
-      message.payload?.message,
-      message.payload?.details || "",
-      message.tabId ? { tabId: message.tabId } : ""
-    );
+    const source = message.payload?.source || "offscreen";
+    const prefix =
+      source === "sidepanel" ? "[polyglot-live/sidepanel->background]" : "[polyglot-live/offscreen->background]";
+    console.info(prefix, message.payload?.message, message.payload?.details || "", message.tabId ? { tabId: message.tabId } : "");
     sendResponse({ ok: true });
     return false;
   }
@@ -151,12 +150,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function startTranslation(message, sender) {
   console.info("[polyglot-live/background] start requested", {
+    inputSource: message.inputSource,
     targetLanguage: message.targetLanguage,
     originalAudioMixPercent: message.originalAudioMixPercent,
     tabId: message.tabId
   });
   const tabId = await resolveTabIdForStart(message, sender);
   return startTranslationFromTab(tabId, {
+    inputSource: message.inputSource,
     originalAudioMixPercent: message.originalAudioMixPercent,
     targetLanguage: message.targetLanguage
   });
@@ -173,6 +174,7 @@ async function getAuthConfig() {
 async function getTranslationPreferences() {
   const { translationPrefs = {} } = await chrome.storage.local.get("translationPrefs");
   return {
+    inputSource: normalizeInputSource(translationPrefs.inputSource),
     originalAudioMixPercent: normalizeOriginalAudioMixPercent(
       translationPrefs.originalAudioMixPercent ?? (translationPrefs.passThroughOriginalAudio ? 100 : undefined)
     ),
@@ -215,16 +217,22 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     await ensureOffscreenDocument();
 
     const authConfig = await getAuthConfig();
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-    console.info("[polyglot-live/background] tab capture stream acquired", {
-      tabId,
-      targetLanguage: translationPrefs.targetLanguage
-    });
+    const inputSource = normalizeInputSource(translationPrefs.inputSource);
+    let streamId = null;
+
+    if (inputSource === "tab") {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+      console.info("[polyglot-live/background] tab capture stream acquired", {
+        tabId,
+        targetLanguage: translationPrefs.targetLanguage
+      });
+    }
 
     sessionState.activeSession = true;
     sessionState.authConfig = authConfig;
     sessionState.awaitingTranslatedAudioStart = false;
     sessionState.didPauseSourceMedia = false;
+    sessionState.inputSource = inputSource;
     sessionState.startedAt = Date.now();
     sessionState.tabId = tabId;
     sessionState.targetLanguage = translationPrefs.targetLanguage;
@@ -234,14 +242,17 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
     );
     startCostRun(tabId, sessionState.startedAt);
 
-    const pauseResult = await pauseTabMedia(tabId);
-    sessionState.didPauseSourceMedia = pauseResult.didPausePlayback;
-    sessionState.awaitingTranslatedAudioStart = pauseResult.didPausePlayback;
-    console.info("[polyglot-live/background] source media pause result", { tabId, ...pauseResult });
+    if (inputSource === "tab") {
+      const pauseResult = await pauseTabMedia(tabId);
+      sessionState.didPauseSourceMedia = pauseResult.didPausePlayback;
+      sessionState.awaitingTranslatedAudioStart = pauseResult.didPausePlayback;
+      console.info("[polyglot-live/background] source media pause result", { tabId, ...pauseResult });
+    }
 
     const offscreenResponse = await chrome.runtime.sendMessage({
       type: "OFFSCREEN_START",
       payload: {
+        inputSource,
         originalAudioMixPercent: normalizeOriginalAudioMixPercent(translationPrefs.originalAudioMixPercent),
         streamId,
         tabId,
@@ -260,7 +271,13 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
       throw new Error(offscreenResponse?.error || "Offscreen pipeline failed to start.");
     }
 
-    updateSessionState(tabId, "starting", `Capturing tab audio for ${translationPrefs.targetLanguage}.`);
+    updateSessionState(
+      tabId,
+      "starting",
+      inputSource === "microphone"
+        ? `Capturing microphone audio for ${translationPrefs.targetLanguage}.`
+        : `Capturing tab audio for ${translationPrefs.targetLanguage}.`
+    );
     return {
       startedAt: sessionState.startedAt,
       tabId
@@ -529,6 +546,7 @@ function createSessionState(tabId) {
       hasReplay: false,
       isRecording: false
     },
+    inputSource: DEFAULT_INPUT_SOURCE,
     originalAudioMixPercent: DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
     sourceMediaResumeDelaySeconds: DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
     startedAt: null,
@@ -582,6 +600,7 @@ function buildSessionSnapshot(sessionState) {
   return {
     activeSession: sessionState.activeSession,
     estimatedCostMs: getTotalEstimatedCostMs(),
+    inputSource: sessionState.inputSource,
     isStarting: startingTabs.has(sessionState.tabId),
     isStopping: stoppingTabs.has(sessionState.tabId),
     originalAudioMixPercent: sessionState.originalAudioMixPercent,
@@ -713,6 +732,10 @@ function normalizeOriginalAudioMixPercent(value) {
   }
 
   return Math.min(100, Math.max(0, Math.round(numericValue)));
+}
+
+function normalizeInputSource(value) {
+  return value === "microphone" ? "microphone" : DEFAULT_INPUT_SOURCE;
 }
 
 function startCostRun(tabId, startedAt) {

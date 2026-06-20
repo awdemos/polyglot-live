@@ -13,7 +13,14 @@
           <p class="eyebrow">Real-time tab audio</p>
           <button id="themeToggleButton" type="button" class="theme-toggle">Dark theme</button>
         </div>
-        <h1>polyglot-live</h1>
+        <div class="title-row">
+          <h1>polyglot-live</h1>
+          <span id="buildVersion" class="build-version">v0.0.0</span>
+          <span id="micIndicator" class="mic-indicator" hidden>
+            <span class="mic-indicator-dot"></span>
+            <span>Mic live</span>
+          </span>
+        </div>
         <p class="lede">Play the tab audio first, then press Start here to begin translation. Nothing auto-starts.</p>
         <div class="cost-banner" aria-live="polite">
           <span class="cost-label">Estimated session cost</span>
@@ -23,6 +30,22 @@
       </header>
 
       <section class="card">
+        <label class="field">
+          <span>Input source</span>
+          <select id="inputSource"></select>
+        </label>
+
+        <details id="microphoneAccessControls" class="inline-accordion" hidden>
+          <summary class="inline-accordion-summary">
+            <span>Microphone Access</span>
+            <span class="muted">permission check</span>
+          </summary>
+          <div class="inline-accordion-body">
+            <button id="grantMicrophoneAccessButton" type="button" class="toolbar-button">Grant microphone access</button>
+            <p id="microphoneAccessMessage" class="hint">Microphone mode needs one-time browser permission from this panel.</p>
+          </div>
+        </details>
+
         <label class="field">
           <span>Target language</span>
           <select id="targetLanguage"></select>

@@ -77,12 +77,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function startPipeline({ streamId, tabId, targetLanguage, originalAudioMixPercent, tokenEndpoint, tokenSecret }) {
+async function startPipeline({ inputSource, streamId, tabId, targetLanguage, originalAudioMixPercent, tokenEndpoint, tokenSecret }) {
   if (!tabId) {
     throw new Error("A tab id is required to start the offscreen pipeline.");
   }
 
   emitDebug(tabId, "Starting offscreen pipeline", {
+    inputSource,
     originalAudioMixPercent,
     streamId,
     targetLanguage,
@@ -95,6 +96,7 @@ async function startPipeline({ streamId, tabId, targetLanguage, originalAudioMix
   }
 
   const pipeline = new TabAudioPipeline({
+    inputSource,
     originalAudioMixPercent,
     streamId,
     tabId,
@@ -138,7 +140,8 @@ function getPipelineOrThrow(tabId) {
 }
 
 class TabAudioPipeline {
-  constructor({ originalAudioMixPercent, streamId, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
+  constructor({ inputSource, originalAudioMixPercent, streamId, tabId, targetLanguage, tokenEndpoint, tokenSecret }) {
+    this.inputSource = normalizeInputSource(inputSource);
     this.originalAudioMixPercent = normalizeOriginalAudioMixPercent(originalAudioMixPercent);
     this.streamId = streamId;
     this.tabId = tabId;
@@ -170,17 +173,10 @@ class TabAudioPipeline {
     });
     await this.session.connect();
 
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        mandatory: {
-          chromeMediaSource: "tab",
-          chromeMediaSourceId: this.streamId
-        }
-      },
-      video: false
-    });
-    emitDebug(this.tabId, "Tab media stream acquired", {
+    this.mediaStream = await this.createInputMediaStream();
+    emitDebug(this.tabId, `${this.getInputSourceLabel()} media stream acquired`, {
       audioTrackCount: this.mediaStream.getAudioTracks().length,
+      inputSource: this.inputSource,
       targetLanguage: this.targetLanguage
     });
 
@@ -213,7 +209,38 @@ class TabAudioPipeline {
       this.enqueuePcm16(pcm16);
     };
 
-    emitStatus(this.tabId, "streaming", `Streaming tab audio to Gemini for ${this.targetLanguage}. Waiting for translated audio...`);
+    emitStatus(
+      this.tabId,
+      "streaming",
+      `Streaming ${this.inputSource === "microphone" ? "microphone" : "tab"} audio to Gemini for ${this.targetLanguage}. Waiting for translated audio...`
+    );
+  }
+
+  async createInputMediaStream() {
+    if (this.inputSource === "microphone") {
+      return navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true
+        },
+        video: false
+      });
+    }
+
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: this.streamId
+        }
+      },
+      video: false
+    });
+  }
+
+  getInputSourceLabel() {
+    return this.inputSource === "microphone" ? "Microphone" : "Tab";
   }
 
   async stop() {
@@ -977,4 +1004,8 @@ function normalizeOriginalAudioMixPercent(value) {
   }
 
   return Math.min(100, Math.max(0, Math.round(numericValue)));
+}
+
+function normalizeInputSource(value) {
+  return value === "microphone" ? "microphone" : "tab";
 }

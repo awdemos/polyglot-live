@@ -1,18 +1,24 @@
 import {
+  DEFAULT_INPUT_SOURCE,
   DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
   DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
   DEFAULT_TARGET_LANGUAGE_CODE,
   DEFAULT_TOKEN_ENDPOINT,
   LIVE_TRANSLATE_ESTIMATED_COST_PER_MINUTE_USD,
   RTL_LANGUAGE_CODES,
+  SUPPORTED_INPUT_SOURCES,
   SUPPORTED_TRANSLATION_LANGUAGES
 } from "./config.js";
+const inputSourceInput = document.querySelector("#inputSource");
 const targetLanguageInput = document.querySelector("#targetLanguage");
 const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
 const sourceResumeDelaySecondsInput = document.querySelector("#sourceResumeDelaySeconds");
 const originalAudioMixPercentInput = document.querySelector("#originalAudioMixPercent");
 const originalAudioMixPercentValue = document.querySelector("#originalAudioMixPercentValue");
+const microphoneAccessControls = document.querySelector("#microphoneAccessControls");
+const grantMicrophoneAccessButton = document.querySelector("#grantMicrophoneAccessButton");
+const microphoneAccessMessage = document.querySelector("#microphoneAccessMessage");
 const startRecordingButton = document.querySelector("#startRecordingButton");
 const stopRecordingButton = document.querySelector("#stopRecordingButton");
 const saveReplayButton = document.querySelector("#saveReplayButton");
@@ -34,6 +40,8 @@ const themeToggleButton = document.querySelector("#themeToggleButton");
 const costBanner = document.querySelector(".cost-banner");
 const sessionCostValue = document.querySelector("#sessionCostValue");
 const sessionCostMeta = document.querySelector("#sessionCostMeta");
+const buildVersion = document.querySelector("#buildVersion");
+const micIndicator = document.querySelector("#micIndicator");
 const originalPlaceholder = "Original transcript will appear here as speech is detected.";
 let sessionPollId = null;
 let sessionCostTimerId = null;
@@ -46,6 +54,9 @@ let replayIsRecording = false;
 let currentTabId = null;
 let currentSessionStartedAt = null;
 let currentEstimatedCostMs = 0;
+let currentSessionInputSource = DEFAULT_INPUT_SOURCE;
+let microphonePermissionState = "unknown";
+let microphonePermissionWindowId = null;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 
@@ -61,6 +72,10 @@ themeToggleButton.addEventListener("click", async () => {
   const nextTheme = document.body.dataset.theme === "dark" ? "light" : "dark";
   applyTheme(nextTheme);
   await chrome.storage.local.set({ panelTheme: nextTheme });
+});
+
+grantMicrophoneAccessButton.addEventListener("click", async () => {
+  await requestMicrophoneAccess();
 });
 
 saveTranscriptButton.addEventListener("click", () => {
@@ -164,6 +179,11 @@ startButton.addEventListener("click", async () => {
     return;
   }
 
+  if (getSelectedInputSource() === "microphone" && microphonePermissionState !== "granted") {
+    updateStatus("error", "Grant microphone access in the side panel before starting microphone translation.");
+    return;
+  }
+
   const selectedTargetLanguage = getSelectedTargetLanguageCode();
   const shouldResetForFreshStart =
     phaseBadge.textContent === "idle" ||
@@ -188,6 +208,7 @@ startButton.addEventListener("click", async () => {
 
   const response = await chrome.runtime.sendMessage({
     type: "START_TRANSLATION",
+    inputSource: getSelectedInputSource(),
     originalAudioMixPercent: normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value),
     tabId: currentTabId,
     targetLanguage: selectedTargetLanguage
@@ -196,6 +217,13 @@ startButton.addEventListener("click", async () => {
   setBusy(false);
 
   if (!response?.ok) {
+    if ((response?.error || "").includes("Permission dismissed")) {
+      updateStatus("error", "Microphone permission was dismissed. Click Grant microphone access and allow the mic.");
+      microphonePermissionState = "denied";
+      updateMicrophoneAccessUi();
+      return;
+    }
+
     if ((response?.error || "").includes("already starting")) {
       updateStatus("starting", "A translation session is already starting. Please wait a moment.");
       await syncSessionState();
@@ -207,6 +235,7 @@ startButton.addEventListener("click", async () => {
   }
 
   lastStartedTargetLanguage = selectedTargetLanguage;
+  currentSessionInputSource = getSelectedInputSource();
   currentSessionStartedAt = typeof response.startedAt === "number" && Number.isFinite(response.startedAt)
     ? response.startedAt
     : Date.now();
@@ -234,6 +263,21 @@ stopButton.addEventListener("click", async () => {
 });
 
 chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "MIC_PERMISSION_STATE") {
+    microphonePermissionState =
+      message.state === "granted" ? "granted" : message.state === "denied" ? "denied" : "unknown";
+    if (message.windowClosed && microphonePermissionWindowId === message.windowId) {
+      microphonePermissionWindowId = null;
+    }
+    updateMicrophoneAccessUi();
+    if (message.state === "granted") {
+      updateStatus("ready", "Microphone access granted. Safe to start microphone translation.");
+    } else if (message.state === "denied") {
+      updateStatus("error", `Microphone access was not granted: ${message.reason || "Permission dismissed"}`);
+    }
+    return;
+  }
+
   if (message?.type !== "SESSION_EVENT" || message.tabId !== currentTabId) {
     return;
   }
@@ -269,6 +313,7 @@ function updateStatus(phase, message) {
   if (phase === "idle") {
     lastStartedTargetLanguage = null;
   }
+  updateMicIndicator();
   syncButtonsForPhase(phase);
   syncPollingForPhase(phase);
   syncCostTimerForPhase(phase);
@@ -281,16 +326,21 @@ async function initialize() {
     "panelTheme",
     "translationPrefs"
   ]);
+  buildVersion.textContent = `v${chrome.runtime.getManifest().version}`;
   tokenEndpointInput.value = authConfig.tokenEndpoint || DEFAULT_TOKEN_ENDPOINT;
   tokenSecretInput.value = authConfig.tokenSecret || "";
   applyTheme(panelTheme);
+  await refreshMicrophonePermissionState();
+  renderInputSourceOptions();
   renderTargetLanguageOptions();
+  inputSourceInput.value = normalizeInputSource(translationPrefs.inputSource);
   targetLanguageInput.value = normalizeTargetLanguageCode(translationPrefs.targetLanguage);
   sourceResumeDelaySecondsInput.value = String(
     normalizeSourceMediaResumeDelaySeconds(translationPrefs.sourceMediaResumeDelaySeconds)
   );
   originalAudioMixPercentInput.value = String(normalizeOriginalAudioMixPercent(translationPrefs.originalAudioMixPercent));
   updateOriginalAudioMixPercentValue();
+  updateInputSourcePresentation(inputSourceInput.value);
   updateTargetLanguagePresentation(targetLanguageInput.value);
 
   tokenEndpointInput.addEventListener("change", () => {
@@ -299,6 +349,11 @@ async function initialize() {
 
   tokenSecretInput.addEventListener("change", () => {
     void persistAuthConfig();
+  });
+
+  inputSourceInput.addEventListener("change", () => {
+    updateInputSourcePresentation(getSelectedInputSource());
+    void persistTranslationPrefs();
   });
 
   targetLanguageInput.addEventListener("change", () => {
@@ -356,6 +411,7 @@ async function persistTranslationPrefs() {
   const targetLanguage = getSelectedTargetLanguageCode();
   await chrome.storage.local.set({
     translationPrefs: {
+      inputSource: getSelectedInputSource(),
       originalAudioMixPercent: normalizeOriginalAudioMixPercent(originalAudioMixPercentInput.value),
       sourceMediaResumeDelaySeconds: normalizeSourceMediaResumeDelaySeconds(sourceResumeDelaySecondsInput.value),
       targetLanguage
@@ -801,6 +857,29 @@ function renderTargetLanguageOptions() {
   targetLanguageInput.innerHTML = optionsMarkup;
 }
 
+function renderInputSourceOptions() {
+  const optionsMarkup = SUPPORTED_INPUT_SOURCES.map(
+    ({ value, label }) => `<option value="${value}">${label}</option>`
+  ).join("");
+  inputSourceInput.innerHTML = optionsMarkup;
+}
+
+function normalizeInputSource(value) {
+  return SUPPORTED_INPUT_SOURCES.some((source) => source.value === value) ? value : DEFAULT_INPUT_SOURCE;
+}
+
+function getSelectedInputSource() {
+  return normalizeInputSource(inputSourceInput.value);
+}
+
+function updateInputSourcePresentation(inputSource) {
+  const isMicrophone = normalizeInputSource(inputSource) === "microphone";
+  originalAudioMixPercentInput.disabled = false;
+  microphoneAccessControls.hidden = !isMicrophone;
+  updateMicrophoneAccessUi();
+  updateMicIndicator();
+}
+
 function normalizeTargetLanguageCode(code) {
   return SUPPORTED_TRANSLATION_LANGUAGES.some((language) => language.code === code)
     ? code
@@ -834,6 +913,7 @@ function updateTargetLanguagePresentation(targetLanguageCode) {
 async function syncSessionState() {
   if (!currentTabId) {
     currentEstimatedCostMs = 0;
+    currentSessionInputSource = getSelectedInputSource();
     updateStatus("idle", "No active browser tab is available for translation.");
     resetTranscriptOutputs();
     return;
@@ -848,6 +928,12 @@ async function syncSessionState() {
     targetLanguageInput.value = normalizeTargetLanguageCode(response.targetLanguage);
     updateTargetLanguagePresentation(targetLanguageInput.value);
   }
+
+  if (response.inputSource) {
+    inputSourceInput.value = normalizeInputSource(response.inputSource);
+    updateInputSourcePresentation(inputSourceInput.value);
+  }
+  currentSessionInputSource = normalizeInputSource(response.inputSource || inputSourceInput.value);
 
   if (response.sourceMediaResumeDelaySeconds !== undefined) {
     sourceResumeDelaySecondsInput.value = String(
@@ -932,6 +1018,7 @@ async function refreshActiveTabContext() {
   currentTabId = nextTabId;
   lastStartedTargetLanguage = null;
   currentSessionStartedAt = null;
+  currentSessionInputSource = getSelectedInputSource();
   resetTranscriptOutputs();
 
   if (!currentTabId) {
@@ -1015,6 +1102,125 @@ function syncCostTimerForPhase(phase) {
 
 function isCostTrackingPhase(phase) {
   return phase === "starting" || phase === "connecting" || phase === "running" || phase === "streaming" || phase === "reconnecting";
+}
+
+function updateMicIndicator() {
+  const phase = phaseBadge.textContent || "idle";
+  const micIsActive = currentSessionInputSource === "microphone" && isCostTrackingPhase(phase);
+  micIndicator.hidden = !micIsActive;
+}
+
+function updateMicrophoneAccessUi() {
+  if (microphoneAccessControls.hidden) {
+    return;
+  }
+
+  if (microphonePermissionState === "granted") {
+    microphoneAccessMessage.textContent = "Microphone ready. You can start live translated commentary.";
+    grantMicrophoneAccessButton.textContent = "Re-check microphone access";
+    return;
+  }
+
+  if (microphonePermissionState === "denied") {
+    microphoneAccessMessage.textContent = "Microphone permission is not active. Click again and allow access when the browser prompts.";
+    grantMicrophoneAccessButton.textContent = "Grant microphone access";
+    return;
+  }
+
+  microphoneAccessMessage.textContent = "Microphone mode needs one-time browser permission from this panel.";
+  grantMicrophoneAccessButton.textContent = "Grant microphone access";
+}
+
+async function refreshMicrophonePermissionState() {
+  try {
+    if (!navigator.permissions?.query) {
+      emitPanelDebug("Permissions API is unavailable for microphone preflight", {
+        hasPermissionsApi: Boolean(navigator.permissions)
+      });
+      microphonePermissionState = "unknown";
+      updateMicrophoneAccessUi();
+      return;
+    }
+
+    const permissionStatus = await navigator.permissions.query({ name: "microphone" });
+    emitPanelDebug("Microphone permission state refreshed", {
+      state: permissionStatus.state
+    });
+    microphonePermissionState = permissionStatus.state === "granted" ? "granted" : permissionStatus.state === "denied" ? "denied" : "unknown";
+    permissionStatus.onchange = () => {
+      microphonePermissionState =
+        permissionStatus.state === "granted" ? "granted" : permissionStatus.state === "denied" ? "denied" : "unknown";
+      emitPanelDebug("Microphone permission state changed", {
+        state: permissionStatus.state
+      });
+      updateMicrophoneAccessUi();
+    };
+  } catch (error) {
+    emitPanelDebug("Unable to query microphone permission state", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    microphonePermissionState = "unknown";
+  }
+
+  updateMicrophoneAccessUi();
+}
+
+async function requestMicrophoneAccess() {
+  grantMicrophoneAccessButton.disabled = true;
+  microphoneAccessMessage.textContent = "Opening microphone permission window...";
+
+  try {
+    emitPanelDebug("Opening microphone permission window", {
+      inputSource: getSelectedInputSource(),
+      location: location.href
+    });
+    microphonePermissionState = "unknown";
+    updateMicrophoneAccessUi();
+
+    const permissionPageUrl = chrome.runtime.getURL("mic-permission.html");
+    const permissionWindow = await chrome.windows.create({
+      focused: true,
+      height: 520,
+      type: "popup",
+      url: permissionPageUrl,
+      width: 420
+    });
+    microphonePermissionWindowId = permissionWindow.id ?? null;
+    microphoneAccessMessage.textContent = "Microphone permission window opened. Complete the prompt there.";
+    emitPanelDebug("Microphone permission window opened", {
+      url: permissionPageUrl,
+      windowId: microphonePermissionWindowId
+    });
+  } catch (error) {
+    emitPanelDebug("Microphone permission window failed to open", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    microphonePermissionState = "denied";
+    updateMicrophoneAccessUi();
+    updateStatus("error", `Unable to open microphone permission window: ${error?.message || "Unknown error"}`);
+  } finally {
+    emitPanelDebug("Microphone access request completed", {
+      permissionState: microphonePermissionState
+    });
+    grantMicrophoneAccessButton.disabled = false;
+  }
+}
+
+function emitPanelDebug(message, details = undefined) {
+  console.info("[polyglot-live/sidepanel]", message, details || "");
+  chrome.runtime.sendMessage({
+    type: "SESSION_DEBUG",
+    payload: {
+      details,
+      message,
+      source: "sidepanel"
+    },
+    tabId: currentTabId
+  }).catch(() => {
+    return undefined;
+  });
 }
 
 function formatUsd(value) {

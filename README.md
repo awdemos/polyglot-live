@@ -78,6 +78,35 @@ Open PowerShell in the repo root:
 cd <repo-root>
 ```
 
+## Start the local token server
+
+Use this exact startup sequence in PowerShell:
+
+```powershell
+cd <repo-root>
+$env:GEMINI_API_KEY="your-real-gemini-api-key"
+$env:POLYGLOT_LIVE_SHARED_SECRET="your-local-secret"
+node .\server\token-server.mjs
+```
+
+Expected server output:
+
+```text
+polyglot-live token server listening at http://127.0.0.1:8787/token
+polyglot-live readiness probe available at http://127.0.0.1:8787/status
+```
+
+Then use these same values in the side panel:
+
+- `Token endpoint`: `http://127.0.0.1:8787/token`
+- `Shared secret`: the exact same value you used in `POLYGLOT_LIVE_SHARED_SECRET`
+
+Notes:
+
+- `GEMINI_API_KEY` is your real Google AI Studio API key
+- `POLYGLOT_LIVE_SHARED_SECRET` is just a local secret you choose yourself
+- the shared secret is not registered with Gemini; it only protects your local token server
+
 ## API key safety
 
 Use your Gemini API key only on the local token server side.
