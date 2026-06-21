@@ -31,8 +31,14 @@
 
       <details class="accordion card controls-accordion" open>
         <summary class="accordion-summary">
-          <span>Translation Controls</span>
-          <span class="muted">source, language, mix</span>
+          <div class="accordion-summary-main">
+            <span>Translation Controls</span>
+            <span class="muted">source, language, mix</span>
+          </div>
+          <div class="accordion-summary-actions">
+            <button id="summaryStartButton" type="button" class="summary-action-button">Start</button>
+            <button id="summaryStopButton" type="button" class="summary-action-button secondary">Stop</button>
+          </div>
         </summary>
         <div class="accordion-body controls-body">
           <label class="field">
@@ -63,11 +69,6 @@
               <span id="originalAudioMixPercentValue" class="range-value">0%</span>
             </div>
           </label>
-
-          <div class="actions">
-            <button id="startButton" type="button">Start</button>
-            <button id="stopButton" type="button" class="secondary">Stop</button>
-          </div>
         </div>
       </details>
 
@@ -75,57 +76,173 @@
         <div class="status-head">
           <h2>Live Text</h2>
           <div class="transcript-toolbar">
-            <span class="muted">collapsible panes</span>
-            <button id="clearTranscriptButton" type="button" class="toolbar-button">Clear text</button>
-            <button id="saveTranscriptButton" type="button" class="toolbar-button">Export transcripts</button>
+            <span class="muted">session workflow</span>
           </div>
         </div>
-        <div class="transcript-grid">
-          <details class="transcript-accordion" open>
-            <summary class="pane-head">
-              <h3>Original</h3>
-              <span class="muted">input</span>
-            </summary>
-            <section class="transcript-pane transcript-pane-resizable">
-              <pre id="originalTranscriptOutput">Original transcript will appear here as speech is detected.</pre>
-            </section>
-          </details>
+        <div class="panel-tabs" role="tablist" aria-label="Transcript workflow tabs">
+          <button id="liveTabButton" type="button" class="panel-tab is-active" role="tab" aria-selected="true" aria-controls="liveTabPanel">Live</button>
+          <button id="comparisonTabButton" type="button" class="panel-tab" role="tab" aria-selected="false" aria-controls="comparisonTabPanel">Comparison</button>
+          <button id="metricsTabButton" type="button" class="panel-tab" role="tab" aria-selected="false" aria-controls="metricsTabPanel">Metrics</button>
+        </div>
 
-          <details class="transcript-accordion" open>
-            <summary class="pane-head">
-              <h3 id="translatedPaneTitle">Spanish</h3>
-              <span class="muted">translated</span>
-            </summary>
-            <section class="transcript-pane transcript-pane-resizable">
-              <div id="translatedTranscriptOutput" class="translated-transcript-empty">
-                Spanish translation will appear here as Gemini returns audio/text events.
+        <section id="liveTabPanel" class="tab-panel is-active" role="tabpanel" aria-labelledby="liveTabButton">
+          <div class="transcript-grid">
+            <details class="transcript-accordion" open>
+              <summary class="pane-head">
+                <h3>Original</h3>
+                <span class="muted">input</span>
+              </summary>
+              <section class="transcript-pane transcript-pane-resizable">
+                <pre id="originalTranscriptOutput">Original transcript will appear here as speech is detected.</pre>
+              </section>
+            </details>
+
+            <details class="transcript-accordion" open>
+              <summary class="pane-head">
+                <h3 id="translatedPaneTitle">Spanish</h3>
+                <span class="muted">translated</span>
+              </summary>
+              <section class="transcript-pane transcript-pane-resizable">
+                <div id="translatedTranscriptOutput" class="translated-transcript-empty">
+                  Spanish translation will appear here as Gemini returns audio/text events.
+                </div>
+              </section>
+            </details>
+          </div>
+        </section>
+
+        <section id="comparisonTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="comparisonTabButton" hidden>
+          <div class="transcript-grid">
+            <details class="transcript-accordion" open>
+              <summary class="pane-head">
+                <h3>Original</h3>
+                <span class="muted">review source</span>
+              </summary>
+              <section class="transcript-pane transcript-pane-resizable">
+                <pre id="comparisonOriginalTranscriptOutput">Original transcript will appear here as speech is detected.</pre>
+              </section>
+            </details>
+
+            <details class="transcript-accordion" open>
+              <summary class="pane-head">
+                <div class="pane-title-group">
+                  <h3 id="comparisonPaneTitle">Comparison</h3>
+                  <span class="muted">back-translated</span>
+                </div>
+              </summary>
+              <section class="transcript-pane transcript-pane-resizable">
+                <div id="comparisonStatusRow" class="processing-row" style="display: none;" hidden>
+                  <span class="inline-spinner" aria-hidden="true"></span>
+                  <span id="comparisonStatusMessage">Processing comparison... please wait...</span>
+                </div>
+                <div id="comparisonTranscriptOutput" class="translated-transcript-empty">
+                  Browser-AI comparison will appear here when back-translation is available.
+                </div>
+              </section>
+            </details>
+          </div>
+        </section>
+
+        <section id="metricsTabPanel" class="tab-panel" role="tabpanel" aria-labelledby="metricsTabButton" hidden>
+          <div class="metrics-shell">
+            <div class="metrics-toolbar">
+              <div class="metrics-status-row">
+                <span id="metricsSpinner" class="inline-spinner" hidden aria-hidden="true"></span>
+                <p id="metricsStatusMessage" class="hint metrics-status">Use local AI after the session to score the translation against the original and back-translation.</p>
               </div>
-            </section>
-          </details>
+              <button id="exportMetricsButton" type="button" class="toolbar-button">Export metrics</button>
+            </div>
+            <p class="hint metrics-legend">Scores are alignment ratings on a 0-100 scale, not percentages. Higher means closer match.</p>
+
+            <div class="metrics-grid">
+              <article class="metrics-card">
+                <span class="metrics-card-label">Overall fidelity</span>
+                <strong id="metricsOverallScore" class="metrics-score">--</strong>
+                <span id="metricsOverallBand" class="metrics-band">Not scored</span>
+                <p id="metricsOverallNote" class="metrics-card-note">Local AI score will appear here.</p>
+              </article>
+
+              <article class="metrics-card">
+                <span class="metrics-card-label">Intent match</span>
+                <strong id="metricsIntentScore" class="metrics-score">--</strong>
+                <span id="metricsIntentBand" class="metrics-band">Not scored</span>
+                <p id="metricsIntentNote" class="metrics-card-note">Checks whether the meaning stayed intact.</p>
+              </article>
+
+              <article class="metrics-card">
+                <span class="metrics-card-label">Tone match</span>
+                <strong id="metricsToneScore" class="metrics-score">--</strong>
+                <span id="metricsToneBand" class="metrics-band">Not scored</span>
+                <p id="metricsToneNote" class="metrics-card-note">Looks at style, emphasis, and delivery.</p>
+              </article>
+
+              <article class="metrics-card">
+                <span class="metrics-card-label">Numeric accuracy</span>
+                <strong id="metricsNumericScore" class="metrics-score">--</strong>
+                <span id="metricsNumericBand" class="metrics-band">Not scored</span>
+                <p id="metricsNumericNote" class="metrics-card-note">Tracks numbers, scores, percentages, and counts.</p>
+              </article>
+
+              <article class="metrics-card">
+                <span class="metrics-card-label">Named entities</span>
+                <strong id="metricsEntityScore" class="metrics-score">--</strong>
+                <span id="metricsEntityBand" class="metrics-band">Not scored</span>
+                <p id="metricsEntityNote" class="metrics-card-note">Checks people, places, teams, brands, and titles.</p>
+              </article>
+
+              <article class="metrics-card">
+                <span class="metrics-card-label">Omissions / additions</span>
+                <strong id="metricsOmissionScore" class="metrics-score">--</strong>
+                <span id="metricsOmissionBand" class="metrics-band">Not scored</span>
+                <p id="metricsOmissionNote" class="metrics-card-note">Flags missing or invented content.</p>
+              </article>
+            </div>
+
+            <div class="metrics-detail-grid">
+              <article class="metrics-detail-card">
+                <h3>Summary</h3>
+                <p id="metricsSummaryOutput" class="metrics-detail-copy">Metrics will appear here after comparison is ready and you open this tab.</p>
+              </article>
+
+              <article class="metrics-detail-card">
+                <h3>Strengths</h3>
+                <ul id="metricsStrengthsList" class="metrics-list">
+                  <li>Nothing scored yet.</li>
+                </ul>
+              </article>
+
+              <article class="metrics-detail-card">
+                <h3>Concerns</h3>
+                <ul id="metricsConcernsList" class="metrics-list">
+                  <li>Nothing scored yet.</li>
+                </ul>
+              </article>
+
+              <article class="metrics-detail-card">
+                <h3>Recommended checks</h3>
+                <ul id="metricsActionsList" class="metrics-list">
+                  <li>Nothing scored yet.</li>
+                </ul>
+              </article>
+            </div>
+          </div>
+        </section>
+        <div class="transcript-footer-actions">
+          <button id="clearTranscriptButton" type="button" class="toolbar-button">Clear text</button>
+          <button id="saveTranscriptButton" type="button" class="toolbar-button">Export transcripts</button>
         </div>
       </section>
 
       <details class="accordion card">
         <summary class="accordion-summary">
-          <span>Audio Alignment</span>
-          <span class="muted">resume lag</span>
-        </summary>
-        <div class="accordion-body">
-          <label class="field">
-            <span>Resume lag (seconds)</span>
-            <input id="sourceResumeDelaySeconds" type="number" min="0" max="30" step="1" inputmode="numeric">
-          </label>
-          <p class="hint">Delays source tab media resume after translated audio begins so visuals line up more closely.</p>
-        </div>
-      </details>
-
-      <details class="accordion card">
-        <summary class="accordion-summary">
-          <span>Replay Recording</span>
-          <span id="recordingIndicator" class="recording-indicator">
-            <span class="recording-dot"></span>
-            <span class="recording-label">idle</span>
-          </span>
+          <div class="accordion-summary-main recording-summary-main">
+            <span>Recording</span>
+            <span class="recording-summary-separator">:</span>
+            <span id="recordingIndicator" class="recording-indicator">
+              <span class="recording-dot"></span>
+              <span class="recording-label">idle</span>
+            </span>
+          </div>
         </summary>
         <div class="accordion-body">
           <div class="recording-actions recording-actions-body">
@@ -139,33 +256,48 @@
 
       <details class="accordion card">
         <summary class="accordion-summary">
-          <span>Status</span>
-          <span id="phaseBadge" class="badge">idle</span>
+          <span>Utilities</span>
         </summary>
         <div class="accordion-body">
-          <p id="statusMessage">Manual start only. Play tab audio first, then press Start in the side panel.</p>
-          <p class="hint">Live Translate expects 16-bit PCM input at 16kHz mono and returns 24kHz mono audio.</p>
-        </div>
-      </details>
+          <section class="utility-section">
+            <div class="utility-heading">
+              <span>Audio Alignment</span>
+              <span class="muted">resume lag</span>
+            </div>
+            <label class="field">
+              <span>Resume lag (seconds)</span>
+              <input id="sourceResumeDelaySeconds" type="number" min="0" max="30" step="1" inputmode="numeric">
+            </label>
+            <p class="hint">Delays source tab media resume after translated audio begins so visuals line up more closely.</p>
+          </section>
 
-      <details class="accordion card">
-        <summary class="accordion-summary">
-          <span>Auth</span>
-          <span class="muted">ephemeral token</span>
-        </summary>
-        <div class="accordion-body">
-          <label class="field">
-            <span>Token endpoint</span>
-            <input id="tokenEndpoint" type="url" placeholder="http://127.0.0.1:8787/token">
-          </label>
-          <label class="field">
-            <span>Shared secret (optional)</span>
-            <input id="tokenSecret" type="password" placeholder="Optional local dev secret">
-          </label>
-          <div class="auth-actions">
-            <button id="checkAuthButton" type="button">Check readiness</button>
-          </div>
-          <p id="authMessage" class="hint">Run the local token server, then click Check readiness.</p>
+          <section class="utility-section">
+            <div class="utility-heading">
+              <span>Auth</span>
+              <span class="muted">ephemeral token</span>
+            </div>
+            <label class="field">
+              <span>Token endpoint</span>
+              <input id="tokenEndpoint" type="url" placeholder="http://127.0.0.1:8787/token">
+            </label>
+            <label class="field">
+              <span>Shared secret (optional)</span>
+              <input id="tokenSecret" type="password" placeholder="Optional local dev secret">
+            </label>
+            <div class="auth-actions">
+              <button id="checkAuthButton" type="button">Check readiness</button>
+            </div>
+            <p id="authMessage" class="hint">Run the local token server, then click Check readiness.</p>
+          </section>
+
+          <section class="utility-section utility-section-status">
+            <div class="utility-heading">
+              <span>Status</span>
+              <span id="phaseBadge" class="badge">idle</span>
+            </div>
+            <p id="statusMessage">Manual start only. Play tab audio first, then press Start in the side panel.</p>
+            <p class="hint">Live Translate expects 16-bit PCM input at 16kHz mono and returns 24kHz mono audio.</p>
+          </section>
         </div>
       </details>
     </main>

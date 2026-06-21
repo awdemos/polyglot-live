@@ -13,6 +13,8 @@ const inputSourceInput = document.querySelector("#inputSource");
 const targetLanguageInput = document.querySelector("#targetLanguage");
 const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
+const summaryStartButton = document.querySelector("#summaryStartButton");
+const summaryStopButton = document.querySelector("#summaryStopButton");
 const sourceResumeDelaySecondsInput = document.querySelector("#sourceResumeDelaySeconds");
 const originalAudioMixPercentInput = document.querySelector("#originalAudioMixPercent");
 const originalAudioMixPercentValue = document.querySelector("#originalAudioMixPercentValue");
@@ -28,8 +30,44 @@ const recordingLabel = document.querySelector(".recording-label");
 const statusMessage = document.querySelector("#statusMessage");
 const phaseBadge = document.querySelector("#phaseBadge");
 const translatedPaneTitle = document.querySelector("#translatedPaneTitle");
+const comparisonPaneTitle = document.querySelector("#comparisonPaneTitle");
+const liveTabButton = document.querySelector("#liveTabButton");
+const comparisonTabButton = document.querySelector("#comparisonTabButton");
+const metricsTabButton = document.querySelector("#metricsTabButton");
+const liveTabPanel = document.querySelector("#liveTabPanel");
+const comparisonTabPanel = document.querySelector("#comparisonTabPanel");
+const metricsTabPanel = document.querySelector("#metricsTabPanel");
 const originalTranscriptOutput = document.querySelector("#originalTranscriptOutput");
+const comparisonOriginalTranscriptOutput = document.querySelector("#comparisonOriginalTranscriptOutput");
 const translatedTranscriptOutput = document.querySelector("#translatedTranscriptOutput");
+const comparisonTranscriptOutput = document.querySelector("#comparisonTranscriptOutput");
+const comparisonStatusRow = document.querySelector("#comparisonStatusRow");
+const comparisonStatusMessage = document.querySelector("#comparisonStatusMessage");
+const metricsSpinner = document.querySelector("#metricsSpinner");
+const metricsStatusMessage = document.querySelector("#metricsStatusMessage");
+const exportMetricsButton = document.querySelector("#exportMetricsButton");
+const metricsOverallScore = document.querySelector("#metricsOverallScore");
+const metricsOverallBand = document.querySelector("#metricsOverallBand");
+const metricsOverallNote = document.querySelector("#metricsOverallNote");
+const metricsIntentScore = document.querySelector("#metricsIntentScore");
+const metricsIntentBand = document.querySelector("#metricsIntentBand");
+const metricsIntentNote = document.querySelector("#metricsIntentNote");
+const metricsToneScore = document.querySelector("#metricsToneScore");
+const metricsToneBand = document.querySelector("#metricsToneBand");
+const metricsToneNote = document.querySelector("#metricsToneNote");
+const metricsNumericScore = document.querySelector("#metricsNumericScore");
+const metricsNumericBand = document.querySelector("#metricsNumericBand");
+const metricsNumericNote = document.querySelector("#metricsNumericNote");
+const metricsEntityScore = document.querySelector("#metricsEntityScore");
+const metricsEntityBand = document.querySelector("#metricsEntityBand");
+const metricsEntityNote = document.querySelector("#metricsEntityNote");
+const metricsOmissionScore = document.querySelector("#metricsOmissionScore");
+const metricsOmissionBand = document.querySelector("#metricsOmissionBand");
+const metricsOmissionNote = document.querySelector("#metricsOmissionNote");
+const metricsSummaryOutput = document.querySelector("#metricsSummaryOutput");
+const metricsStrengthsList = document.querySelector("#metricsStrengthsList");
+const metricsConcernsList = document.querySelector("#metricsConcernsList");
+const metricsActionsList = document.querySelector("#metricsActionsList");
 const clearTranscriptButton = document.querySelector("#clearTranscriptButton");
 const saveTranscriptButton = document.querySelector("#saveTranscriptButton");
 const tokenEndpointInput = document.querySelector("#tokenEndpoint");
@@ -43,11 +81,22 @@ const sessionCostMeta = document.querySelector("#sessionCostMeta");
 const buildVersion = document.querySelector("#buildVersion");
 const micIndicator = document.querySelector("#micIndicator");
 const originalPlaceholder = "Original transcript will appear here as speech is detected.";
+const comparisonPlaceholder = "Browser-AI comparison will appear here when back-translation is available.";
+const metricsIdleMessage = "Use local AI after the session to score the translation against the original and back-translation.";
+const metricsWaitingForComparisonMessage = "Start comparison and let it finish before generating local-AI metrics.";
+const COMPARISON_REFRESH_DEBOUNCE_MS = 2200;
+const COMPARISON_MIN_DELTA_CHARS = 48;
+const BROWSER_TRANSLATOR_SUPPORTED_CODES = new Set([
+  "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "fi", "fr", "hi", "hr", "hu", "id", "it",
+  "iw", "ja", "kn", "ko", "lt", "mr", "nl", "no", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "ta",
+  "te", "th", "tr", "uk", "vi", "zh", "zh-Hant"
+]);
 let sessionPollId = null;
 let sessionCostTimerId = null;
 let translatedSegments = [];
 let pendingTranslatedAudioMs = 0;
 let activeHighlightTimeoutId = null;
+let comparisonRefreshTimeoutId = null;
 let lastStartedTargetLanguage = null;
 let replayHasSavedCapture = false;
 let replayIsRecording = false;
@@ -57,6 +106,21 @@ let currentEstimatedCostMs = 0;
 let currentSessionInputSource = DEFAULT_INPUT_SOURCE;
 let microphonePermissionState = "unknown";
 let microphonePermissionWindowId = null;
+let comparisonTranslator = null;
+let comparisonTranslatorPairKey = null;
+let comparisonDetector = null;
+let comparisonSourceLanguageCode = null;
+let comparisonLastRenderedText = "";
+let comparisonGenerationToken = 0;
+let comparisonEnabled = false;
+let comparisonIsWorking = false;
+let comparisonWorkingSince = 0;
+let comparisonHideTimeoutId = null;
+let metricsLanguageModel = null;
+let metricsLanguageModelReady = null;
+let metricsHasResults = false;
+let metricsIsWorking = false;
+let activeWorkflowTab = "live";
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 
@@ -80,6 +144,24 @@ grantMicrophoneAccessButton.addEventListener("click", async () => {
 
 saveTranscriptButton.addEventListener("click", () => {
   exportTranscripts();
+});
+
+liveTabButton.addEventListener("click", () => {
+  setActiveWorkflowTab("live");
+});
+
+comparisonTabButton.addEventListener("click", () => {
+  setActiveWorkflowTab("comparison");
+  void ensureComparisonModeActive();
+});
+
+metricsTabButton.addEventListener("click", () => {
+  setActiveWorkflowTab("metrics");
+  void ensureMetricsModeActive();
+});
+
+exportMetricsButton.addEventListener("click", () => {
+  exportMetricsReport();
 });
 
 clearTranscriptButton.addEventListener("click", async () => {
@@ -173,7 +255,27 @@ saveReplayButton.addEventListener("click", async () => {
   updateRecordingMessage("Replay saved.");
 });
 
-startButton.addEventListener("click", async () => {
+startButton?.addEventListener("click", async () => {
+  await startTranslation();
+});
+
+summaryStartButton.addEventListener("click", async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  await startTranslation();
+});
+
+stopButton?.addEventListener("click", async () => {
+  await stopTranslation();
+});
+
+summaryStopButton.addEventListener("click", async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  await stopTranslation();
+});
+
+async function startTranslation() {
   if (!currentTabId) {
     updateStatus("error", "No active browser tab is available for translation.");
     return;
@@ -240,9 +342,9 @@ startButton.addEventListener("click", async () => {
     ? response.startedAt
     : Date.now();
   updateStatus("running", `Session started on tab ${response.tabId}.`);
-});
+}
 
-stopButton.addEventListener("click", async () => {
+async function stopTranslation() {
   if (!currentTabId) {
     updateStatus("error", "No active browser tab is available for translation.");
     return;
@@ -258,9 +360,8 @@ stopButton.addEventListener("click", async () => {
   }
 
   lastStartedTargetLanguage = null;
-  resetTranscriptOutputs();
-  updateStatus("idle", "Translation stopped.");
-});
+  updateStatus("idle", "Translation stopped. Session transcript preserved for review.");
+}
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "MIC_PERMISSION_STATE") {
@@ -303,8 +404,14 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 function setBusy(isBusy) {
-  startButton.disabled = isBusy;
-  stopButton.disabled = !isBusy;
+  if (startButton) {
+    startButton.disabled = isBusy;
+  }
+  summaryStartButton.disabled = isBusy;
+  if (stopButton) {
+    stopButton.disabled = !isBusy;
+  }
+  summaryStopButton.disabled = !isBusy;
 }
 
 function updateStatus(phase, message) {
@@ -386,6 +493,7 @@ async function initialize() {
   updateRecordingMessage("Replay recording captures translated audio as WebM for later playback.");
   renderSessionCost();
   resetTranscriptOutputs();
+  updateMetricsStatus(metricsIdleMessage);
   chrome.tabs.onActivated.addListener(() => {
     void refreshActiveTabContext();
   });
@@ -493,6 +601,251 @@ function updateRecordingIndicator() {
   recordingLabel.textContent = isRecording ? "recording" : replayHasSavedCapture ? "saved" : "idle";
 }
 
+function setActiveWorkflowTab(nextTab) {
+  activeWorkflowTab = nextTab === "comparison" || nextTab === "metrics" ? nextTab : "live";
+  const tabMap = [
+    { button: liveTabButton, panel: liveTabPanel, key: "live" },
+    { button: comparisonTabButton, panel: comparisonTabPanel, key: "comparison" },
+    { button: metricsTabButton, panel: metricsTabPanel, key: "metrics" }
+  ];
+
+  tabMap.forEach(({ button, panel, key }) => {
+    const isActive = key === activeWorkflowTab;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+}
+
+function updateMetricsStatus(message) {
+  metricsStatusMessage.textContent = message;
+}
+
+function setComparisonWorking(isWorking, reason = "unspecified") {
+  comparisonIsWorking = Boolean(isWorking);
+
+  if (comparisonHideTimeoutId) {
+    clearTimeout(comparisonHideTimeoutId);
+    comparisonHideTimeoutId = null;
+  }
+
+  if (comparisonIsWorking) {
+    comparisonWorkingSince = Date.now();
+    comparisonStatusRow.hidden = false;
+    comparisonStatusRow.style.display = "flex";
+    comparisonTranscriptOutput.classList.add("comparison-output-hidden");
+  } else {
+    const elapsedMs = comparisonWorkingSince ? Date.now() - comparisonWorkingSince : 0;
+    const minimumVisibleMs = 700;
+    const hideRow = () => {
+      comparisonStatusRow.hidden = true;
+      comparisonStatusRow.style.display = "none";
+      comparisonTranscriptOutput.classList.remove("comparison-output-hidden");
+      comparisonHideTimeoutId = null;
+    };
+
+    if (elapsedMs >= minimumVisibleMs) {
+      hideRow();
+    } else {
+      comparisonHideTimeoutId = setTimeout(hideRow, minimumVisibleMs - elapsedMs);
+    }
+  }
+
+  emitPanelDebug("Comparison working state changed", {
+    comparisonIsWorking,
+    reason,
+    comparisonStatusRowDisplay: comparisonStatusRow.style.display,
+    comparisonStatusRowHidden: comparisonStatusRow.hidden,
+    comparisonTextLength: comparisonTranscriptOutput.textContent?.length || 0
+  });
+  if (comparisonIsWorking) {
+    comparisonStatusMessage.textContent = "Processing comparison... please wait...";
+  }
+}
+
+function setMetricsWorking(isWorking) {
+  metricsIsWorking = Boolean(isWorking);
+  metricsSpinner.hidden = !metricsIsWorking;
+}
+
+function resetMetricsOutput() {
+  metricsHasResults = false;
+  setMetricsWorking(false);
+  metricsOverallScore.textContent = "--";
+  updateMetricsBand(metricsOverallBand, "Not scored", null);
+  metricsOverallNote.textContent = "Local AI score will appear here.";
+  metricsIntentScore.textContent = "--";
+  updateMetricsBand(metricsIntentBand, "Not scored", null);
+  metricsIntentNote.textContent = "Checks whether the meaning stayed intact.";
+  metricsToneScore.textContent = "--";
+  updateMetricsBand(metricsToneBand, "Not scored", null);
+  metricsToneNote.textContent = "Looks at style, emphasis, and delivery.";
+  metricsNumericScore.textContent = "--";
+  updateMetricsBand(metricsNumericBand, "Not scored", null);
+  metricsNumericNote.textContent = "Tracks numbers, scores, percentages, and counts.";
+  metricsEntityScore.textContent = "--";
+  updateMetricsBand(metricsEntityBand, "Not scored", null);
+  metricsEntityNote.textContent = "Checks people, places, teams, brands, and titles.";
+  metricsOmissionScore.textContent = "--";
+  updateMetricsBand(metricsOmissionBand, "Not scored", null);
+  metricsOmissionNote.textContent = "Flags missing or invented content.";
+  metricsSummaryOutput.textContent =
+    "Metrics will appear here after comparison is ready and you open this tab.";
+  renderMetricsList(metricsStrengthsList, ["Nothing scored yet."]);
+  renderMetricsList(metricsConcernsList, ["Nothing scored yet."]);
+  renderMetricsList(metricsActionsList, ["Nothing scored yet."]);
+}
+
+function invalidateMetrics(reason = "Transcript changed. Reopen Metrics after the session is ready.") {
+  if (!metricsHasResults) {
+    return;
+  }
+
+  updateMetricsStatus(reason);
+}
+
+function renderMetricsList(listElement, items) {
+  listElement.innerHTML = "";
+  const nextItems = Array.isArray(items) && items.length > 0 ? items : ["Nothing scored yet."];
+  nextItems.forEach((item) => {
+    const listItem = document.createElement("li");
+    listItem.textContent = item;
+    listElement.appendChild(listItem);
+  });
+}
+
+function isNotApplicableMetric(note) {
+  return /no specific|no relevant|not present|none present|nothing to score|not enough .* to score|no .* to score/i.test(
+    note || ""
+  );
+}
+
+function getMetricsBand(score, note) {
+  if (!Number.isFinite(score) || isNotApplicableMetric(note)) {
+    return { className: "is-na", label: "N/A" };
+  }
+
+  if (score >= 90) {
+    return { className: "is-excellent", label: "Excellent" };
+  }
+
+  if (score >= 80) {
+    return { className: "is-strong", label: "Strong" };
+  }
+
+  if (score >= 65) {
+    return { className: "is-good", label: "Good" };
+  }
+
+  if (score >= 45) {
+    return { className: "is-mixed", label: "Mixed" };
+  }
+
+  return { className: "is-low", label: "Low" };
+}
+
+function updateMetricsBand(bandElement, label, className) {
+  bandElement.textContent = label;
+  bandElement.className = "metrics-band";
+  if (className) {
+    bandElement.classList.add(className);
+  }
+}
+
+function renderMetricScore(scoreElement, bandElement, noteElement, score, note, fallbackNote) {
+  const resolvedNote = note || fallbackNote;
+  const omissionMode = bandElement === metricsOmissionBand;
+  const band = omissionMode ? getOmissionMetricsBand(score, resolvedNote) : getMetricsBand(score, resolvedNote);
+  if (band.label === "N/A") {
+    scoreElement.textContent = "N/A";
+  } else {
+    scoreElement.textContent = Number.isFinite(score) ? `${Math.max(0, Math.min(100, Math.round(score)))}/100` : "--";
+  }
+  updateMetricsBand(bandElement, band.label, band.className);
+  noteElement.textContent = resolvedNote;
+}
+
+function getOmissionMetricsBand(score, note) {
+  if (!Number.isFinite(score) || isNotApplicableMetric(note)) {
+    return { className: "is-na", label: "N/A" };
+  }
+
+  if (score <= 10) {
+    return { className: "is-excellent", label: "Low risk" };
+  }
+
+  if (score <= 25) {
+    return { className: "is-strong", label: "Minor risk" };
+  }
+
+  if (score <= 45) {
+    return { className: "is-good", label: "Moderate risk" };
+  }
+
+  if (score <= 65) {
+    return { className: "is-mixed", label: "Elevated risk" };
+  }
+
+  return { className: "is-low", label: "High risk" };
+}
+
+function renderMetricsReport(report) {
+  metricsHasResults = true;
+  renderMetricScore(
+    metricsOverallScore,
+    metricsOverallBand,
+    metricsOverallNote,
+    report.overallScore,
+    report.overallNote,
+    "Overall quality estimate from original vs back-translation."
+  );
+  renderMetricScore(
+    metricsIntentScore,
+    metricsIntentBand,
+    metricsIntentNote,
+    report.intentScore,
+    report.intentNote,
+    "How well the intended meaning survived translation."
+  );
+  renderMetricScore(
+    metricsToneScore,
+    metricsToneBand,
+    metricsToneNote,
+    report.toneScore,
+    report.toneNote,
+    "How closely the style and emphasis matched."
+  );
+  renderMetricScore(
+    metricsNumericScore,
+    metricsNumericBand,
+    metricsNumericNote,
+    report.numericScore,
+    report.numericNote,
+    "How accurately numbers and factual quantities were retained."
+  );
+  renderMetricScore(
+    metricsEntityScore,
+    metricsEntityBand,
+    metricsEntityNote,
+    report.entityScore,
+    report.entityNote,
+    "How accurately names and entities were retained."
+  );
+  renderMetricScore(
+    metricsOmissionScore,
+    metricsOmissionBand,
+    metricsOmissionNote,
+    report.omissionScore,
+    report.omissionNote,
+    "Whether content was dropped or invented."
+  );
+  metricsSummaryOutput.textContent = report.summary || "No summary returned by local AI.";
+  renderMetricsList(metricsStrengthsList, report.strengths);
+  renderMetricsList(metricsConcernsList, report.concerns);
+  renderMetricsList(metricsActionsList, report.recommendedChecks);
+}
+
 function exportTranscripts() {
   const targetLanguageLabel = getSelectedTargetLanguageLabel();
   const originalText = normalizeExportText(
@@ -502,6 +855,11 @@ function exportTranscripts() {
     translatedTranscriptOutput.classList.contains("translated-transcript-empty")
       ? ""
       : translatedTranscriptOutput.textContent
+  );
+  const comparisonText = normalizeExportText(
+    comparisonTranscriptOutput.classList.contains("translated-transcript-empty")
+      ? ""
+      : comparisonTranscriptOutput.textContent
   );
   const exportedAt = new Date();
   const content = [
@@ -515,6 +873,9 @@ function exportTranscripts() {
     "",
     targetLanguageLabel,
     translatedText || "(empty)",
+    "",
+    "Comparison",
+    comparisonText || "(empty)",
     ""
   ].join("\n");
 
@@ -531,17 +892,102 @@ function exportTranscripts() {
   }, 0);
 }
 
+function exportMetricsReport() {
+  const exportedAt = new Date();
+  const targetLanguageLabel = getSelectedTargetLanguageLabel();
+  const reportSections = [
+    "polyglot-live metrics export",
+    `Exported: ${exportedAt.toLocaleString()}`,
+    `Target language: ${targetLanguageLabel}`,
+    `Status: ${phaseBadge.textContent || "idle"}`,
+    "",
+    "Overall fidelity",
+    `${metricsOverallScore.textContent} (${metricsOverallBand.textContent})`,
+    metricsOverallNote.textContent,
+    "",
+    "Intent match",
+    `${metricsIntentScore.textContent} (${metricsIntentBand.textContent})`,
+    metricsIntentNote.textContent,
+    "",
+    "Tone match",
+    `${metricsToneScore.textContent} (${metricsToneBand.textContent})`,
+    metricsToneNote.textContent,
+    "",
+    "Numeric accuracy",
+    `${metricsNumericScore.textContent} (${metricsNumericBand.textContent})`,
+    metricsNumericNote.textContent,
+    "",
+    "Named entities",
+    `${metricsEntityScore.textContent} (${metricsEntityBand.textContent})`,
+    metricsEntityNote.textContent,
+    "",
+    "Omissions / additions",
+    `${metricsOmissionScore.textContent} (${metricsOmissionBand.textContent})`,
+    metricsOmissionNote.textContent,
+    "",
+    "Summary",
+    metricsSummaryOutput.textContent || "(empty)",
+    "",
+    "Strengths",
+    ...collectMetricsListItems(metricsStrengthsList),
+    "",
+    "Concerns",
+    ...collectMetricsListItems(metricsConcernsList),
+    "",
+    "Recommended checks",
+    ...collectMetricsListItems(metricsActionsList),
+    ""
+  ];
+
+  const blob = new Blob([reportSections.join("\n")], { type: "text/plain;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
+  const downloadLink = document.createElement("a");
+  downloadLink.href = objectUrl;
+  downloadLink.download = `polyglot-live_metrics_${buildFileTimestamp(exportedAt)}.txt`;
+  document.body.appendChild(downloadLink);
+  downloadLink.click();
+  downloadLink.remove();
+  setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 0);
+}
+
+function collectMetricsListItems(listElement) {
+  const items = Array.from(listElement.querySelectorAll("li"))
+    .map((item) => normalizeWhitespace(item.textContent))
+    .filter(Boolean);
+
+  if (items.length === 0) {
+    return ["(empty)"];
+  }
+
+  return items.map((item) => `- ${item}`);
+}
+
 function resetTranscriptOutputs() {
+  comparisonEnabled = false;
+  setComparisonWorking(false, "reset transcript outputs");
+  resetComparisonTranslatorState();
   originalTranscriptOutput.textContent = originalPlaceholder;
+  comparisonOriginalTranscriptOutput.textContent = originalPlaceholder;
   translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
   translatedTranscriptOutput.className = "translated-transcript-empty";
   applyTranslatedTranscriptDirection(getSelectedTargetLanguageCode());
+  resetComparisonOutput("Comparison will begin when translated text is available.");
   translatedSegments = [];
   pendingTranslatedAudioMs = 0;
   if (activeHighlightTimeoutId) {
     clearTimeout(activeHighlightTimeoutId);
     activeHighlightTimeoutId = null;
   }
+  if (comparisonRefreshTimeoutId) {
+    clearTimeout(comparisonRefreshTimeoutId);
+    comparisonRefreshTimeoutId = null;
+  }
+  comparisonLastRenderedText = "";
+  comparisonGenerationToken += 1;
+  resetMetricsOutput();
+  updateMetricsStatus(metricsIdleMessage);
 }
 
 function renderSessionCost() {
@@ -588,7 +1034,16 @@ function appendOriginalTranscript(text) {
     originalTranscriptOutput.textContent = mergedText;
   }
 
+  if (isPlaceholderText(comparisonOriginalTranscriptOutput.textContent)) {
+    comparisonOriginalTranscriptOutput.textContent = mergedText;
+  } else {
+    comparisonOriginalTranscriptOutput.textContent = mergedText;
+  }
+
   originalTranscriptOutput.scrollTop = originalTranscriptOutput.scrollHeight;
+  comparisonOriginalTranscriptOutput.scrollTop = comparisonOriginalTranscriptOutput.scrollHeight;
+  invalidateMetrics();
+  queueComparisonRefresh();
 }
 
 function appendTranslatedTranscript(text) {
@@ -661,6 +1116,8 @@ function appendTranslatedTranscriptPlain(text) {
   }
 
   translatedTranscriptOutput.scrollTop = translatedTranscriptOutput.scrollHeight;
+  invalidateMetrics();
+  queueComparisonRefresh();
 }
 
 function applyTranslatedAudioTiming(payload) {
@@ -908,6 +1365,8 @@ function updateTargetLanguagePresentation(targetLanguageCode) {
   if (translatedTranscriptOutput.classList.contains("translated-transcript-empty")) {
     translatedTranscriptOutput.textContent = `${label} translation will appear here as Gemini returns audio/text events.`;
   }
+  resetComparisonTranslatorState();
+  resetComparisonOutput();
 }
 
 async function syncSessionState() {
@@ -989,8 +1448,14 @@ function syncButtonsForPhase(phase) {
     phase === "stopping";
   const isRunning = phase === "running";
 
-  startButton.disabled = isStarting || isRunning;
-  stopButton.disabled = !(isStarting || isRunning);
+  if (startButton) {
+    startButton.disabled = isStarting || isRunning;
+  }
+  summaryStartButton.disabled = isStarting || isRunning;
+  if (stopButton) {
+    stopButton.disabled = !(isStarting || isRunning);
+  }
+  summaryStopButton.disabled = !(isStarting || isRunning);
   syncRecordingButtonsForState();
 }
 
@@ -1037,6 +1502,8 @@ async function refreshActiveTabContext() {
 function applyTranscriptSnapshot(transcripts = {}) {
   const originalText = normalizeWhitespace(transcripts.input || "");
   const translatedText = normalizeWhitespace(transcripts.output || "");
+  const currentTranslatedText = getTranslatedTranscriptText();
+  invalidateMetrics();
   translatedSegments = [];
   pendingTranslatedAudioMs = 0;
   if (activeHighlightTimeoutId) {
@@ -1045,6 +1512,7 @@ function applyTranscriptSnapshot(transcripts = {}) {
   }
 
   originalTranscriptOutput.textContent = originalText || originalPlaceholder;
+  comparisonOriginalTranscriptOutput.textContent = originalText || originalPlaceholder;
   applyTranslatedTranscriptDirection(getSelectedTargetLanguageCode());
 
   if (translatedText) {
@@ -1055,12 +1523,820 @@ function applyTranscriptSnapshot(transcripts = {}) {
     translatedTranscriptOutput.textContent = `${getSelectedTargetLanguageLabel()} translation will appear here as Gemini returns audio/text events.`;
     translatedTranscriptOutput.className = "translated-transcript-empty";
   }
+
+  if (!translatedText) {
+    resetComparisonOutput("Comparison will begin when translated text is available.");
+    comparisonLastRenderedText = "";
+    return;
+  }
+
+  if (translatedText !== currentTranslatedText || comparisonTranscriptOutput.classList.contains("translated-transcript-empty")) {
+    queueComparisonRefresh();
+  }
 }
 
 function applyTranslatedTranscriptDirection(targetLanguageCode) {
   const isRtlLanguage = RTL_LANGUAGE_CODES.includes(normalizeTargetLanguageCode(targetLanguageCode));
   translatedTranscriptOutput.classList.toggle("is-rtl", isRtlLanguage);
   translatedTranscriptOutput.dir = isRtlLanguage ? "rtl" : "ltr";
+}
+
+function applyComparisonTranscriptDirection(languageCode) {
+  const normalizedCode = normalizeTargetLanguageCode(languageCode || DEFAULT_TARGET_LANGUAGE_CODE);
+  const isRtlLanguage =
+    RTL_LANGUAGE_CODES.includes(normalizedCode) || normalizeBrowserLanguageCode(languageCode) === "iw";
+  comparisonTranscriptOutput.classList.toggle("is-rtl", isRtlLanguage);
+  comparisonTranscriptOutput.dir = isRtlLanguage ? "rtl" : "ltr";
+}
+
+function resetComparisonOutput(
+  message = comparisonEnabled
+    ? comparisonPlaceholder
+    : "Comparison will begin when translated text is available."
+) {
+  if (!/checking|downloading|preparing|generating|waiting|finalizing/i.test(message)) {
+    setComparisonWorking(false, `reset comparison output: ${message}`);
+  }
+  comparisonPaneTitle.textContent = "Comparison";
+  comparisonTranscriptOutput.textContent = message;
+  comparisonTranscriptOutput.className = "translated-transcript-empty";
+  if (comparisonIsWorking) {
+    comparisonTranscriptOutput.classList.add("comparison-output-hidden");
+  }
+  applyComparisonTranscriptDirection(DEFAULT_TARGET_LANGUAGE_CODE);
+}
+
+function resetComparisonTranslatorState() {
+  comparisonTranslator = null;
+  comparisonTranslatorPairKey = null;
+  comparisonSourceLanguageCode = null;
+}
+
+function getOriginalTranscriptText() {
+  return normalizeWhitespace(
+    isPlaceholderText(originalTranscriptOutput.textContent) ? "" : originalTranscriptOutput.textContent
+  );
+}
+
+function getTranslatedTranscriptText() {
+  return normalizeWhitespace(
+    translatedTranscriptOutput.classList.contains("translated-transcript-empty")
+      ? ""
+      : translatedTranscriptOutput.textContent
+  );
+}
+
+function queueComparisonRefresh() {
+  return queueComparisonRefreshInternal({ force: false });
+}
+
+function queueComparisonRefreshInternal({ force = false } = {}) {
+  if (!comparisonEnabled && !force) {
+    return;
+  }
+
+  const translatedText = getTranslatedTranscriptText();
+  if (!force && !shouldRefreshComparisonForText(translatedText)) {
+    return;
+  }
+
+  if (comparisonRefreshTimeoutId) {
+    clearTimeout(comparisonRefreshTimeoutId);
+  }
+
+  comparisonRefreshTimeoutId = setTimeout(() => {
+    comparisonRefreshTimeoutId = null;
+    void refreshComparisonTranscript();
+  }, COMPARISON_REFRESH_DEBOUNCE_MS);
+}
+
+function shouldRefreshComparisonForText(translatedText) {
+  if (!translatedText) {
+    return false;
+  }
+
+  if (!comparisonLastRenderedText) {
+    return true;
+  }
+
+  if (translatedText === comparisonLastRenderedText) {
+    return false;
+  }
+
+  if (!translatedText.startsWith(comparisonLastRenderedText)) {
+    return true;
+  }
+
+  const deltaText = translatedText.slice(comparisonLastRenderedText.length).trim();
+  if (!deltaText) {
+    return false;
+  }
+
+  if (deltaText.length >= COMPARISON_MIN_DELTA_CHARS) {
+    return true;
+  }
+
+  return /[.!?。！？]\s*$/.test(translatedText);
+}
+
+async function primeComparisonSupportForCurrentSelection() {
+  if (!("Translator" in globalThis)) {
+    resetComparisonOutput("Browser Translator API is not available in this Chrome build.");
+    return;
+  }
+
+  if (getSelectedInputSource() !== "tab") {
+    resetComparisonOutput("Comparison will initialize after the source language is detected from transcript text.");
+    return;
+  }
+
+  if (!currentTabId || !chrome.tabs?.detectLanguage) {
+    resetComparisonOutput("Unable to detect the source tab language for browser-AI comparison.");
+    return;
+  }
+
+  try {
+    resetComparisonOutput("Checking browser-AI comparison availability...");
+    const tabLanguageCode = await chrome.tabs.detectLanguage(currentTabId);
+    const sourceLanguageCode = normalizeBrowserLanguageCode(tabLanguageCode);
+    const targetLanguageCode = normalizeBrowserLanguageCode(getSelectedTargetLanguageCode());
+
+    if (!sourceLanguageCode) {
+      resetComparisonOutput("Source tab language could not be detected for comparison.");
+      return;
+    }
+
+    comparisonSourceLanguageCode = sourceLanguageCode;
+    const translator = await ensureComparisonTranslator(targetLanguageCode, sourceLanguageCode, {
+      requireUserActivation: true
+    });
+
+    if (!translator) {
+      return;
+    }
+
+    comparisonPaneTitle.textContent = `Comparison (${getLanguageLabelFromCode(sourceLanguageCode)})`;
+    resetComparisonOutput("Browser-AI comparison ready. Back-translation will appear as translated text arrives.");
+    comparisonPaneTitle.textContent = `Comparison (${getLanguageLabelFromCode(sourceLanguageCode)})`;
+  } catch (error) {
+    emitPanelDebug("Comparison priming failed during user activation", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    resetComparisonOutput(`Browser comparison setup failed: ${error?.message || "Unknown error"}`);
+  }
+}
+
+async function ensureComparisonModeActive() {
+  emitPanelDebug("Comparison tab activated", {
+    comparisonEnabled,
+    currentTabId,
+    inputSource: getSelectedInputSource(),
+    targetLanguage: getSelectedTargetLanguageCode()
+  });
+  const originalText = getOriginalTranscriptText();
+  const translatedText = getTranslatedTranscriptText();
+  const existingComparisonText = getComparisonTranscriptText();
+  if (existingComparisonText) {
+    comparisonEnabled = true;
+    setComparisonWorking(false, "comparison already exists");
+    return;
+  }
+
+  if (!originalText || !translatedText) {
+    comparisonEnabled = true;
+    setComparisonWorking(false, "missing original or translated transcript");
+    resetComparisonOutput("Browser-AI comparison will appear here when back-translation is available.");
+    return;
+  }
+
+  comparisonEnabled = true;
+  setComparisonWorking(true, "comparison tab activated");
+  resetComparisonOutput("Checking browser-AI comparison availability...");
+  await primeComparisonSupportForCurrentSelection();
+  if (getComparisonTranscriptText()) {
+    setComparisonWorking(false, "comparison text became available during priming");
+    return;
+  }
+  queueComparisonRefreshInternal({ force: true });
+}
+
+async function refreshComparisonTranscript() {
+  if (!comparisonEnabled) {
+    setComparisonWorking(false, "comparison disabled");
+    return;
+  }
+
+  const translatedText = getTranslatedTranscriptText();
+  if (!translatedText) {
+    setComparisonWorking(false, "no translated text");
+    resetComparisonOutput();
+    comparisonLastRenderedText = "";
+    return;
+  }
+
+  if (!("Translator" in globalThis)) {
+    setComparisonWorking(false, "translator api unavailable");
+    resetComparisonOutput("Browser-native comparison is not available in this Chrome build.");
+    return;
+  }
+
+  const sourceLanguageCode = await resolveComparisonSourceLanguage();
+  if (!sourceLanguageCode) {
+    setComparisonWorking(false, "source language unresolved");
+    resetComparisonOutput("Waiting for enough original transcript to detect the source language for comparison.");
+    return;
+  }
+
+  const browserSourceLanguageCode = normalizeBrowserLanguageCode(sourceLanguageCode);
+  const browserTargetLanguageCode = normalizeBrowserLanguageCode(getSelectedTargetLanguageCode());
+  if (
+    !browserSourceLanguageCode ||
+    !browserTargetLanguageCode ||
+    !BROWSER_TRANSLATOR_SUPPORTED_CODES.has(browserSourceLanguageCode) ||
+    !BROWSER_TRANSLATOR_SUPPORTED_CODES.has(browserTargetLanguageCode)
+  ) {
+    setComparisonWorking(false, "unsupported language pair");
+    resetComparisonOutput("Browser-native comparison is not available for this language pair.");
+    return;
+  }
+
+  const translator = await ensureComparisonTranslator(browserTargetLanguageCode, browserSourceLanguageCode);
+  if (!translator) {
+    setComparisonWorking(false, "translator unavailable after ensure");
+    return;
+  }
+
+  const currentToken = ++comparisonGenerationToken;
+
+  try {
+    if (comparisonLastRenderedText === translatedText) {
+      setComparisonWorking(false, "translated text already rendered");
+      return;
+    }
+
+    setComparisonWorking(true, "comparison translation in progress");
+    if (comparisonTranscriptOutput.classList.contains("translated-transcript-empty")) {
+      comparisonTranscriptOutput.textContent = "Generating browser-AI comparison...";
+    }
+
+    const backTranslatedText = normalizeWhitespace(await translator.translate(translatedText));
+    if (currentToken !== comparisonGenerationToken) {
+      setComparisonWorking(false, "stale comparison generation token");
+      return;
+    }
+
+    const sourceLanguageLabel = getLanguageLabelFromCode(sourceLanguageCode);
+    comparisonPaneTitle.textContent = `Comparison (${sourceLanguageLabel})`;
+    applyComparisonTranscriptDirection(sourceLanguageCode);
+    invalidateMetrics("Comparison changed. Reopen Metrics when the review text is ready.");
+    comparisonTranscriptOutput.textContent = backTranslatedText || "No browser-AI comparison text returned yet.";
+    comparisonTranscriptOutput.className = "";
+    comparisonTranscriptOutput.scrollTop = comparisonTranscriptOutput.scrollHeight;
+    comparisonLastRenderedText = translatedText;
+    setComparisonWorking(false, "comparison translation complete");
+  } catch (error) {
+    emitPanelDebug("Browser comparison translation failed", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    setComparisonWorking(false, `comparison translation failed: ${error?.message || "unknown error"}`);
+    resetComparisonOutput(`Browser comparison unavailable: ${error?.message || "Translation failed"}`);
+  }
+}
+
+async function resolveComparisonSourceLanguage() {
+  if (comparisonSourceLanguageCode) {
+    return comparisonSourceLanguageCode;
+  }
+
+  const originalText = getOriginalTranscriptText();
+  if (originalText.length < 24) {
+    return null;
+  }
+
+  const detectorLanguageCode = await detectSourceLanguageFromBrowserAi(originalText);
+  if (detectorLanguageCode) {
+    comparisonSourceLanguageCode = detectorLanguageCode;
+    return comparisonSourceLanguageCode;
+  }
+
+  if (currentTabId && currentSessionInputSource === "tab" && chrome.tabs?.detectLanguage) {
+    try {
+      const tabLanguageCode = await chrome.tabs.detectLanguage(currentTabId);
+      const normalizedTabLanguageCode = normalizeBrowserLanguageCode(tabLanguageCode);
+      if (normalizedTabLanguageCode) {
+        comparisonSourceLanguageCode = normalizedTabLanguageCode;
+        return comparisonSourceLanguageCode;
+      }
+    } catch (error) {
+      emitPanelDebug("Tab language detection failed for comparison pane", {
+        message: error?.message || String(error),
+        name: error?.name || null
+      });
+    }
+  }
+
+  return null;
+}
+
+async function detectSourceLanguageFromBrowserAi(text) {
+  if (!("LanguageDetector" in globalThis)) {
+    return null;
+  }
+
+  try {
+    comparisonDetector ||= await globalThis.LanguageDetector.create();
+    const detectionResults = await comparisonDetector.detect(text);
+    if (!Array.isArray(detectionResults) || detectionResults.length === 0) {
+      return null;
+    }
+
+    const detectedLanguageCode =
+      detectionResults[0]?.detectedLanguage ||
+      detectionResults[0]?.language ||
+      detectionResults[0]?.code ||
+      null;
+    return normalizeBrowserLanguageCode(detectedLanguageCode);
+  } catch (error) {
+    emitPanelDebug("Browser language detection failed for comparison pane", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    return null;
+  }
+}
+
+async function ensureComparisonTranslator(sourceLanguage, targetLanguage, { requireUserActivation = false } = {}) {
+  const pairKey = `${sourceLanguage}->${targetLanguage}`;
+  if (comparisonTranslator && comparisonTranslatorPairKey === pairKey) {
+    return comparisonTranslator;
+  }
+
+  try {
+    const availability = await globalThis.Translator.availability({
+      sourceLanguage,
+      targetLanguage
+    });
+
+    emitPanelDebug("Browser comparison availability checked", {
+      availability,
+      sourceLanguage,
+      targetLanguage
+    });
+
+    if (availability === "downloadable" || availability === "downloading") {
+      resetComparisonOutput("Downloading browser-AI language pack for comparison...");
+    }
+
+    if (!["available", "downloadable", "downloading"].includes(availability)) {
+      resetComparisonOutput("Browser-native comparison is not available for this language pair.");
+      return null;
+    }
+
+    comparisonTranslator = await globalThis.Translator.create({
+      sourceLanguage,
+      targetLanguage,
+      monitor(monitorHandle) {
+        monitorHandle.addEventListener("downloadprogress", (event) => {
+          const progressPercent = Number.isFinite(event?.loaded) ? Math.round(event.loaded * 100) : null;
+          resetComparisonOutput(
+            progressPercent === null
+              ? "Downloading browser-AI language pack for comparison..."
+              : `Downloading browser-AI language pack for comparison... ${progressPercent}%`
+          );
+        });
+      }
+    });
+    comparisonTranslatorPairKey = pairKey;
+    if (comparisonTranslator?.ready) {
+      resetComparisonOutput(
+        requireUserActivation
+          ? "Finalizing browser-AI comparison setup..."
+          : "Preparing browser-AI comparison..."
+      );
+      await comparisonTranslator.ready;
+    }
+    return comparisonTranslator;
+  } catch (error) {
+    emitPanelDebug("Browser comparison translator failed to initialize", {
+      message: error?.message || String(error),
+      name: error?.name || null,
+      sourceLanguage,
+      targetLanguage
+    });
+    const errorMessage = error?.message || "Translator setup failed";
+    resetComparisonOutput(
+      /activation|gesture/i.test(errorMessage)
+        ? "Browser comparison needs a user click to initialize. Press Start again after transcript is visible."
+        : `Browser comparison unavailable: ${errorMessage}`
+    );
+    return null;
+  }
+}
+
+function getComparisonTranscriptText() {
+  return normalizeWhitespace(
+    comparisonTranscriptOutput.classList.contains("translated-transcript-empty")
+      ? ""
+      : comparisonTranscriptOutput.textContent
+  );
+}
+
+function buildMetricsPrompt({ originalText, translatedText, comparisonText, targetLanguageLabel, sourceLanguageLabel }) {
+  return [
+    "You are an objective translation quality evaluator.",
+    "Compare the original transcript against the back-translated transcript.",
+    "Use the direct translated transcript as supporting context only.",
+    "Return strict JSON only with this exact shape:",
+    '{"overallScore":0,"overallNote":"","intentScore":0,"intentNote":"","toneScore":0,"toneNote":"","numericScore":0,"numericNote":"","entityScore":0,"entityNote":"","omissionScore":0,"omissionNote":"","summary":"","strengths":[""],"concerns":[""],"recommendedChecks":[""]}',
+    "Use double quotes for every key and every string value.",
+    "Escape any quote characters that appear inside string values.",
+    "Do not include trailing commas.",
+    "Do not include markdown fences or commentary.",
+    "Scoring rules:",
+    "- Scores are integers from 0 to 100.",
+    "- Be conservative and practical, not flattering.",
+    "- Focus on meaning preservation, tone preservation, numeric accuracy, named entities, and omissions/additions.",
+    "- If there are no important numbers or named entities, still provide a score and explain briefly.",
+    "- Keep each note to one short sentence.",
+    "- Keep summary to 2-4 sentences.",
+    "- Keep list items short and actionable.",
+    "",
+    `Source language label: ${sourceLanguageLabel || "Original"}`,
+    `Target language label: ${targetLanguageLabel}`,
+    "",
+    "Original transcript:",
+    originalText,
+    "",
+    `${targetLanguageLabel} transcript:`,
+    translatedText,
+    "",
+    "Back-translated transcript:",
+    comparisonText
+  ].join("\n");
+}
+
+function extractFirstJsonObject(text) {
+  const rawText = String(text || "").trim();
+  if (!rawText) {
+    return null;
+  }
+
+  const fencedMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidateText = fencedMatch?.[1]?.trim() || rawText;
+  const firstBraceIndex = candidateText.indexOf("{");
+  if (firstBraceIndex === -1) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let isEscaped = false;
+
+  for (let index = firstBraceIndex; index < candidateText.length; index += 1) {
+    const character = candidateText[index];
+
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false;
+      } else if (character === "\\") {
+        isEscaped = true;
+      } else if (character === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return candidateText.slice(firstBraceIndex, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeMetricsScore(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(numericValue)));
+}
+
+function normalizeMetricsNote(value, fallback) {
+  const note = normalizeWhitespace(value);
+  return note || fallback;
+}
+
+function normalizeMetricsList(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => normalizeWhitespace(item))
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+function parseMetricsReport(responseText) {
+  const jsonText = extractFirstJsonObject(responseText);
+  if (!jsonText) {
+    throw new Error("Local AI did not return valid JSON for metrics.");
+  }
+
+  const parsed = parseMetricsJsonWithFallback(jsonText);
+  return {
+    overallScore: normalizeMetricsScore(parsed.overallScore),
+    overallNote: normalizeMetricsNote(parsed.overallNote, "Overall quality estimate from original vs back-translation."),
+    intentScore: normalizeMetricsScore(parsed.intentScore),
+    intentNote: normalizeMetricsNote(parsed.intentNote, "How well the intended meaning survived translation."),
+    toneScore: normalizeMetricsScore(parsed.toneScore),
+    toneNote: normalizeMetricsNote(parsed.toneNote, "How closely the style and emphasis matched."),
+    numericScore: normalizeMetricsScore(parsed.numericScore),
+    numericNote: normalizeMetricsNote(parsed.numericNote, "How accurately numbers and factual quantities were retained."),
+    entityScore: normalizeMetricsScore(parsed.entityScore),
+    entityNote: normalizeMetricsNote(parsed.entityNote, "How accurately names and entities were retained."),
+    omissionScore: normalizeMetricsScore(parsed.omissionScore),
+    omissionNote: normalizeMetricsNote(parsed.omissionNote, "Whether content was dropped or invented."),
+    summary: normalizeMetricsNote(parsed.summary, "No metrics summary returned."),
+    strengths: normalizeMetricsList(parsed.strengths),
+    concerns: normalizeMetricsList(parsed.concerns),
+    recommendedChecks: normalizeMetricsList(parsed.recommendedChecks)
+  };
+}
+
+function parseMetricsJsonWithFallback(jsonText) {
+  try {
+    return JSON.parse(jsonText);
+  } catch (error) {
+    emitPanelDebug("Metrics JSON parse failed, attempting schema salvage", {
+      message: error?.message || String(error)
+    });
+  }
+
+  return {
+    overallScore: extractNumericField(jsonText, "overallScore"),
+    overallNote: extractStringField(jsonText, "overallNote"),
+    intentScore: extractNumericField(jsonText, "intentScore"),
+    intentNote: extractStringField(jsonText, "intentNote"),
+    toneScore: extractNumericField(jsonText, "toneScore"),
+    toneNote: extractStringField(jsonText, "toneNote"),
+    numericScore: extractNumericField(jsonText, "numericScore"),
+    numericNote: extractStringField(jsonText, "numericNote"),
+    entityScore: extractNumericField(jsonText, "entityScore"),
+    entityNote: extractStringField(jsonText, "entityNote"),
+    omissionScore: extractNumericField(jsonText, "omissionScore"),
+    omissionNote: extractStringField(jsonText, "omissionNote"),
+    summary: extractStringField(jsonText, "summary"),
+    strengths: extractArrayField(jsonText, "strengths"),
+    concerns: extractArrayField(jsonText, "concerns"),
+    recommendedChecks: extractArrayField(jsonText, "recommendedChecks")
+  };
+}
+
+function extractNumericField(jsonText, key) {
+  const match = jsonText.match(new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`, "i"));
+  if (!match) {
+    return null;
+  }
+
+  const numericValue = Number(match[1]);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function extractStringField(jsonText, key) {
+  const marker = `"${key}"`;
+  const keyIndex = jsonText.indexOf(marker);
+  if (keyIndex === -1) {
+    return "";
+  }
+
+  const colonIndex = jsonText.indexOf(":", keyIndex + marker.length);
+  if (colonIndex === -1) {
+    return "";
+  }
+
+  const firstQuoteIndex = jsonText.indexOf("\"", colonIndex + 1);
+  if (firstQuoteIndex === -1) {
+    return "";
+  }
+
+  let isEscaped = false;
+  let value = "";
+
+  for (let index = firstQuoteIndex + 1; index < jsonText.length; index += 1) {
+    const character = jsonText[index];
+    if (isEscaped) {
+      value += character;
+      isEscaped = false;
+      continue;
+    }
+
+    if (character === "\\") {
+      isEscaped = true;
+      continue;
+    }
+
+    if (character === "\"") {
+      return value;
+    }
+
+    value += character;
+  }
+
+  return value;
+}
+
+function extractArrayField(jsonText, key) {
+  const marker = `"${key}"`;
+  const keyIndex = jsonText.indexOf(marker);
+  if (keyIndex === -1) {
+    return [];
+  }
+
+  const colonIndex = jsonText.indexOf(":", keyIndex + marker.length);
+  if (colonIndex === -1) {
+    return [];
+  }
+
+  const openingBracketIndex = jsonText.indexOf("[", colonIndex + 1);
+  if (openingBracketIndex === -1) {
+    return [];
+  }
+
+  let depth = 0;
+  let inString = false;
+  let isEscaped = false;
+
+  for (let index = openingBracketIndex; index < jsonText.length; index += 1) {
+    const character = jsonText[index];
+
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false;
+      } else if (character === "\\") {
+        isEscaped = true;
+      } else if (character === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (character === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (character === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        const arrayBody = jsonText.slice(openingBracketIndex + 1, index);
+        const items = [];
+        const stringPattern = /"((?:\\.|[^"\\])*)"/g;
+        let match;
+        while ((match = stringPattern.exec(arrayBody)) !== null) {
+          items.push(match[1]);
+        }
+        return items;
+      }
+    }
+  }
+
+  return [];
+}
+
+async function ensureMetricsLanguageModel({ requireUserActivation = false } = {}) {
+  if (!("LanguageModel" in globalThis)) {
+    throw new Error("Chrome local Prompt API is not available in this build.");
+  }
+
+  if (metricsLanguageModel && metricsLanguageModelReady) {
+    await metricsLanguageModelReady;
+    return metricsLanguageModel;
+  }
+
+  const metricsLanguageModelOptions = {
+    expectedOutputs: [
+      {
+        languages: ["en"],
+        type: "text"
+      }
+    ]
+  };
+
+  const availability = await globalThis.LanguageModel.availability(metricsLanguageModelOptions);
+  emitPanelDebug("Metrics LanguageModel availability checked", {
+    availability
+  });
+
+  if (!["available", "downloadable", "downloading"].includes(availability)) {
+    throw new Error("Chrome local AI metrics are unavailable on this device.");
+  }
+
+  if (availability === "downloadable" || availability === "downloading" || requireUserActivation) {
+    updateMetricsStatus("Processing metrics... please wait...");
+  }
+
+  metricsLanguageModel = await globalThis.LanguageModel.create({
+      ...metricsLanguageModelOptions,
+      monitor(monitorHandle) {
+        monitorHandle.addEventListener("downloadprogress", (event) => {
+          updateMetricsStatus("Processing metrics... please wait...");
+        });
+      }
+    });
+
+  metricsLanguageModelReady = Promise.resolve(metricsLanguageModel?.ready).catch((error) => {
+    metricsLanguageModel = null;
+    metricsLanguageModelReady = null;
+    throw error;
+  });
+
+  await metricsLanguageModelReady;
+  return metricsLanguageModel;
+}
+
+async function generateMetricsReport() {
+  const originalText = getOriginalTranscriptText();
+  const translatedText = getTranslatedTranscriptText();
+  const comparisonText = getComparisonTranscriptText();
+
+  if (!originalText || !translatedText) {
+    updateMetricsStatus("Run a translation session first so local AI has transcript material to score.");
+    return;
+  }
+
+  if (!comparisonText) {
+    updateMetricsStatus(metricsWaitingForComparisonMessage);
+    setActiveWorkflowTab("comparison");
+    return;
+  }
+
+  setMetricsWorking(true);
+  updateMetricsStatus("Processing Metrics please wait....");
+
+  try {
+    const session = await ensureMetricsLanguageModel({ requireUserActivation: true });
+    const sourceLanguageCode = await resolveComparisonSourceLanguage();
+    const sourceLanguageLabel = getLanguageLabelFromCode(sourceLanguageCode || "en");
+    const targetLanguageLabel = getSelectedTargetLanguageLabel();
+    const prompt = buildMetricsPrompt({
+      comparisonText,
+      originalText,
+      sourceLanguageLabel,
+      targetLanguageLabel,
+      translatedText
+    });
+    const responseText = await session.prompt(prompt);
+    const report = parseMetricsReport(responseText);
+    renderMetricsReport(report);
+    updateMetricsStatus("Metrics generated with Chrome local AI. Review the scores and notes below.");
+    emitPanelDebug("Metrics generated successfully", {
+      overallScore: report.overallScore,
+      targetLanguage: getSelectedTargetLanguageCode()
+    });
+  } catch (error) {
+    emitPanelDebug("Metrics generation failed", {
+      message: error?.message || String(error),
+      name: error?.name || null
+    });
+    updateMetricsStatus(`Metrics unavailable: ${error?.message || "Unknown local AI error"}`);
+  } finally {
+    setMetricsWorking(false);
+  }
+}
+
+async function ensureMetricsModeActive() {
+  if (metricsHasResults) {
+    return;
+  }
+
+  if (metricsStatusMessage.textContent === "Generating local AI metrics from the saved session...") {
+    return;
+  }
+
+  await generateMetricsReport();
 }
 
 function syncPollingForPhase(phase) {
@@ -1271,4 +2547,65 @@ async function maybeUpdateOriginalAudioMixInSession() {
   }).catch(() => {
     return undefined;
   });
+}
+
+function normalizeBrowserLanguageCode(code) {
+  if (!code) {
+    return null;
+  }
+
+  const normalizedCode = String(code).trim();
+  const browserAliases = {
+    he: "iw",
+    "pt-BR": "pt",
+    "pt-PT": "pt",
+    "zh-Hans": "zh",
+    "zh-CN": "zh",
+    "zh-SG": "zh",
+    "zh-Hant": "zh-Hant",
+    "zh-TW": "zh-Hant",
+    "zh-HK": "zh-Hant"
+  };
+
+  if (browserAliases[normalizedCode]) {
+    return browserAliases[normalizedCode];
+  }
+
+  if (BROWSER_TRANSLATOR_SUPPORTED_CODES.has(normalizedCode)) {
+    return normalizedCode;
+  }
+
+  const primaryLanguage = normalizedCode.split("-")[0];
+  if (browserAliases[primaryLanguage]) {
+    return browserAliases[primaryLanguage];
+  }
+
+  return BROWSER_TRANSLATOR_SUPPORTED_CODES.has(primaryLanguage) ? primaryLanguage : null;
+}
+
+function getLanguageLabelFromCode(code) {
+  if (!code) {
+    return "Original";
+  }
+
+  const manifestLanguage =
+    SUPPORTED_TRANSLATION_LANGUAGES.find((language) => language.code === code) ||
+    SUPPORTED_TRANSLATION_LANGUAGES.find((language) => normalizeBrowserLanguageCode(language.code) === code);
+  if (manifestLanguage) {
+    return manifestLanguage.label;
+  }
+
+  if (code === "iw") {
+    return "Hebrew";
+  }
+
+  if (code === "pt") {
+    return "Portuguese";
+  }
+
+  if (code === "zh") {
+    return "Chinese";
+  }
+
+  return code;
 }
