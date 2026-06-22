@@ -8,7 +8,7 @@ export const LIVE_URL =
   "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained";
 export const DEFAULT_TARGET_LANGUAGE_CODE = "es";
 export const DEFAULT_INPUT_SOURCE = "tab";
-export const DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS = 5;
+export const DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS = 0;
 export const DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT = 0;
 export const LIVE_TRANSLATE_AUDIO_INPUT_COST_PER_MINUTE_USD = 0.0053;
 export const LIVE_TRANSLATE_AUDIO_OUTPUT_COST_PER_MINUTE_USD = 0.0315;

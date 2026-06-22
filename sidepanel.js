@@ -23,7 +23,9 @@ const grantMicrophoneAccessButton = document.querySelector("#grantMicrophoneAcce
 const microphoneAccessMessage = document.querySelector("#microphoneAccessMessage");
 const startRecordingButton = document.querySelector("#startRecordingButton");
 const stopRecordingButton = document.querySelector("#stopRecordingButton");
+const replayRecordingButton = document.querySelector("#replayRecordingButton");
 const saveReplayButton = document.querySelector("#saveReplayButton");
+const replayPreviewAudio = document.querySelector("#replayPreviewAudio");
 const recordingMessage = document.querySelector("#recordingMessage");
 const recordingIndicator = document.querySelector("#recordingIndicator");
 const recordingLabel = document.querySelector(".recording-label");
@@ -48,21 +50,32 @@ const metricsStatusMessage = document.querySelector("#metricsStatusMessage");
 const exportMetricsButton = document.querySelector("#exportMetricsButton");
 const metricsOverallScore = document.querySelector("#metricsOverallScore");
 const metricsOverallBand = document.querySelector("#metricsOverallBand");
+const metricsOverallMeter = document.querySelector("#metricsOverallMeter");
 const metricsOverallNote = document.querySelector("#metricsOverallNote");
 const metricsIntentScore = document.querySelector("#metricsIntentScore");
 const metricsIntentBand = document.querySelector("#metricsIntentBand");
+const metricsIntentMeter = document.querySelector("#metricsIntentMeter");
 const metricsIntentNote = document.querySelector("#metricsIntentNote");
+const metricsFluencyScore = document.querySelector("#metricsFluencyScore");
+const metricsFluencyBand = document.querySelector("#metricsFluencyBand");
+const metricsFluencyMeter = document.querySelector("#metricsFluencyMeter");
+const metricsFluencyNote = document.querySelector("#metricsFluencyNote");
+const metricsFluencyFlag = document.querySelector("#metricsFluencyFlag");
 const metricsToneScore = document.querySelector("#metricsToneScore");
 const metricsToneBand = document.querySelector("#metricsToneBand");
+const metricsToneMeter = document.querySelector("#metricsToneMeter");
 const metricsToneNote = document.querySelector("#metricsToneNote");
 const metricsNumericScore = document.querySelector("#metricsNumericScore");
 const metricsNumericBand = document.querySelector("#metricsNumericBand");
+const metricsNumericMeter = document.querySelector("#metricsNumericMeter");
 const metricsNumericNote = document.querySelector("#metricsNumericNote");
 const metricsEntityScore = document.querySelector("#metricsEntityScore");
 const metricsEntityBand = document.querySelector("#metricsEntityBand");
+const metricsEntityMeter = document.querySelector("#metricsEntityMeter");
 const metricsEntityNote = document.querySelector("#metricsEntityNote");
 const metricsOmissionScore = document.querySelector("#metricsOmissionScore");
 const metricsOmissionBand = document.querySelector("#metricsOmissionBand");
+const metricsOmissionMeter = document.querySelector("#metricsOmissionMeter");
 const metricsOmissionNote = document.querySelector("#metricsOmissionNote");
 const metricsSummaryOutput = document.querySelector("#metricsSummaryOutput");
 const metricsStrengthsList = document.querySelector("#metricsStrengthsList");
@@ -100,6 +113,8 @@ let comparisonRefreshTimeoutId = null;
 let lastStartedTargetLanguage = null;
 let replayHasSavedCapture = false;
 let replayIsRecording = false;
+let replayIsPlaying = false;
+let replayPreviewUrl = null;
 let currentTabId = null;
 let currentSessionStartedAt = null;
 let currentEstimatedCostMs = 0;
@@ -185,6 +200,7 @@ clearTranscriptButton.addEventListener("click", async () => {
 });
 
 startRecordingButton.addEventListener("click", async () => {
+  stopReplayPreview();
   if (!currentTabId) {
     updateRecordingMessage("Choose a source tab before starting replay recording.");
     return;
@@ -199,7 +215,8 @@ startRecordingButton.addEventListener("click", async () => {
 
   replayIsRecording = true;
   replayHasSavedCapture = false;
-  updateRecordingMessage("Recording translated audio to WebM...");
+  replayIsPlaying = false;
+  updateRecordingMessage("Recording translated audio for replay capture...");
   syncRecordingButtonsForState();
 });
 
@@ -218,12 +235,47 @@ stopRecordingButton.addEventListener("click", async () => {
 
   replayIsRecording = false;
   replayHasSavedCapture = Boolean(response?.hasReplay);
+  replayIsPlaying = false;
   updateRecordingMessage(
     replayHasSavedCapture
-      ? "Replay captured. Press Save replay to download the WebM file."
+      ? "Replay captured. Use Replay to listen or Save replay to download MP3."
       : "Recording stopped, but no replay audio was captured."
   );
   syncRecordingButtonsForState();
+});
+
+replayRecordingButton.addEventListener("click", async () => {
+  if (replayIsPlaying) {
+    stopReplayPreview();
+    updateRecordingMessage("Replay preview stopped.");
+    return;
+  }
+
+  if (!currentTabId) {
+    updateRecordingMessage("Choose a source tab before replaying captured audio.");
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({ type: "PREVIEW_REPLAY_RECORDING", tabId: currentTabId });
+  if (!response?.ok) {
+    updateRecordingMessage(response?.error ?? "Unable to replay the saved audio.");
+    await syncReplayRecordingState();
+    return;
+  }
+
+  const bytes = new Uint8Array(response.bytes || []);
+  const blob = new Blob([bytes], { type: response.mimeType || "audio/webm" });
+  replaceReplayPreviewSource(URL.createObjectURL(blob));
+  replayPreviewAudio.currentTime = 0;
+  try {
+    await replayPreviewAudio.play();
+    replayIsPlaying = true;
+    updateRecordingMessage("Replay preview is playing.");
+    syncRecordingButtonsForState();
+  } catch (error) {
+    stopReplayPreview();
+    updateRecordingMessage(`Replay preview failed: ${error?.message || "Unable to play audio."}`);
+  }
 });
 
 saveReplayButton.addEventListener("click", async () => {
@@ -232,6 +284,7 @@ saveReplayButton.addEventListener("click", async () => {
     return;
   }
 
+  updateRecordingMessage("Converting replay to MP3... please wait...");
   const response = await chrome.runtime.sendMessage({ type: "EXPORT_REPLAY_RECORDING", tabId: currentTabId });
   if (!response?.ok) {
     updateRecordingMessage(response?.error ?? "Unable to save replay.");
@@ -252,7 +305,7 @@ saveReplayButton.addEventListener("click", async () => {
   setTimeout(() => {
     URL.revokeObjectURL(objectUrl);
   }, 0);
-  updateRecordingMessage("Replay saved.");
+  updateRecordingMessage("Replay saved as MP3.");
 });
 
 startButton?.addEventListener("click", async () => {
@@ -490,7 +543,7 @@ async function initialize() {
   });
 
   updateAuthMessage("Not checked yet.");
-  updateRecordingMessage("Replay recording captures translated audio as WebM for later playback.");
+  updateRecordingMessage("Replay recording captures translated audio live and exports MP3 for later playback.");
   renderSessionCost();
   resetTranscriptOutputs();
   updateMetricsStatus(metricsIdleMessage);
@@ -601,6 +654,27 @@ function updateRecordingIndicator() {
   recordingLabel.textContent = isRecording ? "recording" : replayHasSavedCapture ? "saved" : "idle";
 }
 
+function replaceReplayPreviewSource(nextUrl) {
+  if (replayPreviewUrl) {
+    URL.revokeObjectURL(replayPreviewUrl);
+  }
+  replayPreviewUrl = nextUrl;
+  replayPreviewAudio.src = nextUrl;
+}
+
+function stopReplayPreview() {
+  replayPreviewAudio.pause();
+  replayPreviewAudio.currentTime = 0;
+  replayIsPlaying = false;
+  if (replayPreviewUrl) {
+    URL.revokeObjectURL(replayPreviewUrl);
+    replayPreviewUrl = null;
+  }
+  replayPreviewAudio.removeAttribute("src");
+  replayPreviewAudio.load();
+  syncRecordingButtonsForState();
+}
+
 function setActiveWorkflowTab(nextTab) {
   activeWorkflowTab = nextTab === "comparison" || nextTab === "metrics" ? nextTab : "live";
   const tabMap = [
@@ -622,7 +696,11 @@ function updateMetricsStatus(message) {
   metricsStatusMessage.textContent = message;
 }
 
-function setComparisonWorking(isWorking, reason = "unspecified") {
+function updateComparisonStatus(message) {
+  comparisonStatusMessage.textContent = message || "Processing comparison... please wait...";
+}
+
+function setComparisonWorking(isWorking, reason = "unspecified", message = null) {
   comparisonIsWorking = Boolean(isWorking);
 
   if (comparisonHideTimeoutId) {
@@ -634,14 +712,13 @@ function setComparisonWorking(isWorking, reason = "unspecified") {
     comparisonWorkingSince = Date.now();
     comparisonStatusRow.hidden = false;
     comparisonStatusRow.style.display = "flex";
-    comparisonTranscriptOutput.classList.add("comparison-output-hidden");
+    updateComparisonStatus(message);
   } else {
     const elapsedMs = comparisonWorkingSince ? Date.now() - comparisonWorkingSince : 0;
     const minimumVisibleMs = 700;
     const hideRow = () => {
       comparisonStatusRow.hidden = true;
       comparisonStatusRow.style.display = "none";
-      comparisonTranscriptOutput.classList.remove("comparison-output-hidden");
       comparisonHideTimeoutId = null;
     };
 
@@ -659,9 +736,6 @@ function setComparisonWorking(isWorking, reason = "unspecified") {
     comparisonStatusRowHidden: comparisonStatusRow.hidden,
     comparisonTextLength: comparisonTranscriptOutput.textContent?.length || 0
   });
-  if (comparisonIsWorking) {
-    comparisonStatusMessage.textContent = "Processing comparison... please wait...";
-  }
 }
 
 function setMetricsWorking(isWorking) {
@@ -672,12 +746,23 @@ function setMetricsWorking(isWorking) {
 function resetMetricsOutput() {
   metricsHasResults = false;
   setMetricsWorking(false);
+  updateMetricMeter(metricsOverallMeter, 0, "is-na");
+  updateMetricMeter(metricsIntentMeter, 0, "is-na");
+  updateMetricMeter(metricsFluencyMeter, 0, "is-na");
+  updateMetricMeter(metricsToneMeter, 0, "is-na");
+  updateMetricMeter(metricsNumericMeter, 0, "is-na");
+  updateMetricMeter(metricsEntityMeter, 0, "is-na");
+  updateMetricMeter(metricsOmissionMeter, 0, "is-na");
   metricsOverallScore.textContent = "--";
   updateMetricsBand(metricsOverallBand, "Not scored", null);
   metricsOverallNote.textContent = "Local AI score will appear here.";
   metricsIntentScore.textContent = "--";
   updateMetricsBand(metricsIntentBand, "Not scored", null);
   metricsIntentNote.textContent = "Checks whether the meaning stayed intact.";
+  metricsFluencyScore.textContent = "--";
+  updateMetricsBand(metricsFluencyBand, "Not scored", null);
+  metricsFluencyNote.textContent = "Audits grammar and naturalness in the translated text itself.";
+  metricsFluencyFlag.textContent = "Fluency flag: not scored";
   metricsToneScore.textContent = "--";
   updateMetricsBand(metricsToneBand, "Not scored", null);
   metricsToneNote.textContent = "Looks at style, emphasis, and delivery.";
@@ -753,16 +838,34 @@ function updateMetricsBand(bandElement, label, className) {
   }
 }
 
-function renderMetricScore(scoreElement, bandElement, noteElement, score, note, fallbackNote) {
+function updateMetricMeter(meterElement, score, className, options = {}) {
+  if (!meterElement) {
+    return;
+  }
+
+  const invertScale = Boolean(options.invertScale);
+  const safeScore = Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : 0;
+  const renderedPercent = invertScale ? 100 - safeScore : safeScore;
+  meterElement.style.width = `${renderedPercent}%`;
+  meterElement.className = "metrics-meter-fill";
+  if (className) {
+    meterElement.classList.add(className);
+  }
+}
+
+function renderMetricScore(scoreElement, bandElement, meterElement, noteElement, score, note, fallbackNote) {
   const resolvedNote = note || fallbackNote;
   const omissionMode = bandElement === metricsOmissionBand;
   const band = omissionMode ? getOmissionMetricsBand(score, resolvedNote) : getMetricsBand(score, resolvedNote);
+  const safeScore = Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : null;
+  const displayedScore = omissionMode && safeScore !== null ? 100 - safeScore : safeScore;
   if (band.label === "N/A") {
     scoreElement.textContent = "N/A";
   } else {
-    scoreElement.textContent = Number.isFinite(score) ? `${Math.max(0, Math.min(100, Math.round(score)))}/100` : "--";
+    scoreElement.textContent = displayedScore !== null ? `${displayedScore}/100` : "--";
   }
   updateMetricsBand(bandElement, band.label, band.className);
+  updateMetricMeter(meterElement, score, band.className, { invertScale: omissionMode && band.label !== "N/A" });
   noteElement.textContent = resolvedNote;
 }
 
@@ -795,6 +898,7 @@ function renderMetricsReport(report) {
   renderMetricScore(
     metricsOverallScore,
     metricsOverallBand,
+    metricsOverallMeter,
     metricsOverallNote,
     report.overallScore,
     report.overallNote,
@@ -803,14 +907,26 @@ function renderMetricsReport(report) {
   renderMetricScore(
     metricsIntentScore,
     metricsIntentBand,
+    metricsIntentMeter,
     metricsIntentNote,
     report.intentScore,
     report.intentNote,
     "How well the intended meaning survived translation."
   );
   renderMetricScore(
+    metricsFluencyScore,
+    metricsFluencyBand,
+    metricsFluencyMeter,
+    metricsFluencyNote,
+    report.fluencyScore,
+    report.fluencyNote,
+    "How natural and grammatically correct the translated text sounds in the target language."
+  );
+  metricsFluencyFlag.textContent = `Fluency flag: ${report.fluencyFlag || "Requires human review"}`;
+  renderMetricScore(
     metricsToneScore,
     metricsToneBand,
+    metricsToneMeter,
     metricsToneNote,
     report.toneScore,
     report.toneNote,
@@ -819,6 +935,7 @@ function renderMetricsReport(report) {
   renderMetricScore(
     metricsNumericScore,
     metricsNumericBand,
+    metricsNumericMeter,
     metricsNumericNote,
     report.numericScore,
     report.numericNote,
@@ -827,6 +944,7 @@ function renderMetricsReport(report) {
   renderMetricScore(
     metricsEntityScore,
     metricsEntityBand,
+    metricsEntityMeter,
     metricsEntityNote,
     report.entityScore,
     report.entityNote,
@@ -835,6 +953,7 @@ function renderMetricsReport(report) {
   renderMetricScore(
     metricsOmissionScore,
     metricsOmissionBand,
+    metricsOmissionMeter,
     metricsOmissionNote,
     report.omissionScore,
     report.omissionNote,
@@ -908,6 +1027,11 @@ function exportMetricsReport() {
     "Intent match",
     `${metricsIntentScore.textContent} (${metricsIntentBand.textContent})`,
     metricsIntentNote.textContent,
+    "",
+    "Target fluency",
+    `${metricsFluencyScore.textContent} (${metricsFluencyBand.textContent})`,
+    metricsFluencyNote.textContent,
+    metricsFluencyFlag.textContent,
     "",
     "Tone match",
     `${metricsToneScore.textContent} (${metricsToneBand.textContent})`,
@@ -1417,6 +1541,7 @@ async function syncSessionState() {
 
 async function syncReplayRecordingState() {
   if (!currentTabId) {
+    stopReplayPreview();
     replayIsRecording = false;
     replayHasSavedCapture = false;
     updateRecordingIndicator();
@@ -1426,6 +1551,7 @@ async function syncReplayRecordingState() {
 
   const response = await chrome.runtime.sendMessage({ type: "GET_REPLAY_RECORDING_STATE", tabId: currentTabId });
   if (!response?.ok) {
+    stopReplayPreview();
     replayIsRecording = false;
     replayHasSavedCapture = false;
     updateRecordingIndicator();
@@ -1466,6 +1592,8 @@ function syncRecordingButtonsForState() {
     (phase === "running" || phase === "streaming" || phase === "connecting" || phase === "starting");
   startRecordingButton.disabled = !canStartReplayRecording;
   stopRecordingButton.disabled = !replayIsRecording;
+  replayRecordingButton.disabled = replayIsPlaying ? false : replayIsRecording || !replayHasSavedCapture;
+  replayRecordingButton.textContent = replayIsPlaying ? "Stop replay" : "Replay";
   saveReplayButton.disabled = replayIsRecording || !replayHasSavedCapture;
   updateRecordingIndicator();
 }
@@ -1481,6 +1609,7 @@ async function refreshActiveTabContext() {
   }
 
   currentTabId = nextTabId;
+  stopReplayPreview();
   lastStartedTargetLanguage = null;
   currentSessionStartedAt = null;
   currentSessionInputSource = getSelectedInputSource();
@@ -1498,6 +1627,18 @@ async function refreshActiveTabContext() {
   await syncSessionState();
   await syncReplayRecordingState();
 }
+
+replayPreviewAudio.addEventListener("ended", () => {
+  stopReplayPreview();
+  updateRecordingMessage("Replay preview finished.");
+});
+
+replayPreviewAudio.addEventListener("pause", () => {
+  if (!replayPreviewAudio.ended && replayIsPlaying && replayPreviewAudio.currentTime > 0) {
+    replayIsPlaying = false;
+    syncRecordingButtonsForState();
+  }
+});
 
 function applyTranscriptSnapshot(transcripts = {}) {
   const originalText = normalizeWhitespace(transcripts.input || "");
@@ -1554,15 +1695,9 @@ function resetComparisonOutput(
     ? comparisonPlaceholder
     : "Comparison will begin when translated text is available."
 ) {
-  if (!/checking|downloading|preparing|generating|waiting|finalizing/i.test(message)) {
-    setComparisonWorking(false, `reset comparison output: ${message}`);
-  }
   comparisonPaneTitle.textContent = "Comparison";
   comparisonTranscriptOutput.textContent = message;
   comparisonTranscriptOutput.className = "translated-transcript-empty";
-  if (comparisonIsWorking) {
-    comparisonTranscriptOutput.classList.add("comparison-output-hidden");
-  }
   applyComparisonTranscriptDirection(DEFAULT_TARGET_LANGUAGE_CODE);
 }
 
@@ -1641,27 +1776,31 @@ function shouldRefreshComparisonForText(translatedText) {
 
 async function primeComparisonSupportForCurrentSelection() {
   if (!("Translator" in globalThis)) {
+    setComparisonWorking(false, "translator api unavailable during priming");
     resetComparisonOutput("Browser Translator API is not available in this Chrome build.");
     return;
   }
 
   if (getSelectedInputSource() !== "tab") {
+    setComparisonWorking(false, "comparison waiting for transcript source detection");
     resetComparisonOutput("Comparison will initialize after the source language is detected from transcript text.");
     return;
   }
 
   if (!currentTabId || !chrome.tabs?.detectLanguage) {
+    setComparisonWorking(false, "source tab language unavailable for comparison");
     resetComparisonOutput("Unable to detect the source tab language for browser-AI comparison.");
     return;
   }
 
   try {
-    resetComparisonOutput("Checking browser-AI comparison availability...");
+    updateComparisonStatus("Checking browser-AI comparison availability...");
     const tabLanguageCode = await chrome.tabs.detectLanguage(currentTabId);
     const sourceLanguageCode = normalizeBrowserLanguageCode(tabLanguageCode);
     const targetLanguageCode = normalizeBrowserLanguageCode(getSelectedTargetLanguageCode());
 
     if (!sourceLanguageCode) {
+      setComparisonWorking(false, "source tab language not detected");
       resetComparisonOutput("Source tab language could not be detected for comparison.");
       return;
     }
@@ -1676,13 +1815,12 @@ async function primeComparisonSupportForCurrentSelection() {
     }
 
     comparisonPaneTitle.textContent = `Comparison (${getLanguageLabelFromCode(sourceLanguageCode)})`;
-    resetComparisonOutput("Browser-AI comparison ready. Back-translation will appear as translated text arrives.");
-    comparisonPaneTitle.textContent = `Comparison (${getLanguageLabelFromCode(sourceLanguageCode)})`;
   } catch (error) {
     emitPanelDebug("Comparison priming failed during user activation", {
       message: error?.message || String(error),
       name: error?.name || null
     });
+    setComparisonWorking(false, "comparison priming failed");
     resetComparisonOutput(`Browser comparison setup failed: ${error?.message || "Unknown error"}`);
   }
 }
@@ -1711,8 +1849,7 @@ async function ensureComparisonModeActive() {
   }
 
   comparisonEnabled = true;
-  setComparisonWorking(true, "comparison tab activated");
-  resetComparisonOutput("Checking browser-AI comparison availability...");
+  setComparisonWorking(true, "comparison tab activated", "Checking browser-AI comparison availability...");
   await primeComparisonSupportForCurrentSelection();
   if (getComparisonTranscriptText()) {
     setComparisonWorking(false, "comparison text became available during priming");
@@ -1775,10 +1912,7 @@ async function refreshComparisonTranscript() {
       return;
     }
 
-    setComparisonWorking(true, "comparison translation in progress");
-    if (comparisonTranscriptOutput.classList.contains("translated-transcript-empty")) {
-      comparisonTranscriptOutput.textContent = "Generating browser-AI comparison...";
-    }
+    setComparisonWorking(true, "comparison translation in progress", "Processing comparison... please wait...");
 
     const backTranslatedText = normalizeWhitespace(await translator.translate(translatedText));
     if (currentToken !== comparisonGenerationToken) {
@@ -1886,7 +2020,7 @@ async function ensureComparisonTranslator(sourceLanguage, targetLanguage, { requ
     });
 
     if (availability === "downloadable" || availability === "downloading") {
-      resetComparisonOutput("Downloading browser-AI language pack for comparison...");
+      updateComparisonStatus("Preparing browser-AI comparison... please wait...");
     }
 
     if (!["available", "downloadable", "downloading"].includes(availability)) {
@@ -1900,20 +2034,20 @@ async function ensureComparisonTranslator(sourceLanguage, targetLanguage, { requ
       monitor(monitorHandle) {
         monitorHandle.addEventListener("downloadprogress", (event) => {
           const progressPercent = Number.isFinite(event?.loaded) ? Math.round(event.loaded * 100) : null;
-          resetComparisonOutput(
+          updateComparisonStatus(
             progressPercent === null
-              ? "Downloading browser-AI language pack for comparison..."
-              : `Downloading browser-AI language pack for comparison... ${progressPercent}%`
+              ? "Preparing browser-AI comparison... please wait..."
+              : `Preparing browser-AI comparison... please wait... ${progressPercent}%`
           );
         });
       }
     });
     comparisonTranslatorPairKey = pairKey;
     if (comparisonTranslator?.ready) {
-      resetComparisonOutput(
+      updateComparisonStatus(
         requireUserActivation
           ? "Finalizing browser-AI comparison setup..."
-          : "Preparing browser-AI comparison..."
+          : "Preparing browser-AI comparison... please wait..."
       );
       await comparisonTranslator.ready;
     }
@@ -1947,9 +2081,9 @@ function buildMetricsPrompt({ originalText, translatedText, comparisonText, targ
   return [
     "You are an objective translation quality evaluator.",
     "Compare the original transcript against the back-translated transcript.",
-    "Use the direct translated transcript as supporting context only.",
+    "Use the direct translated transcript as a primary fluency audit target and supporting context for the rest.",
     "Return strict JSON only with this exact shape:",
-    '{"overallScore":0,"overallNote":"","intentScore":0,"intentNote":"","toneScore":0,"toneNote":"","numericScore":0,"numericNote":"","entityScore":0,"entityNote":"","omissionScore":0,"omissionNote":"","summary":"","strengths":[""],"concerns":[""],"recommendedChecks":[""]}',
+    '{"overallScore":0,"overallNote":"","intentScore":0,"intentNote":"","fluencyScore":0,"fluencyNote":"","fluencyFlag":"","toneScore":0,"toneNote":"","numericScore":0,"numericNote":"","entityScore":0,"entityNote":"","omissionScore":0,"omissionNote":"","summary":"","strengths":[""],"concerns":[""],"recommendedChecks":[""]}',
     "Use double quotes for every key and every string value.",
     "Escape any quote characters that appear inside string values.",
     "Do not include trailing commas.",
@@ -1957,7 +2091,10 @@ function buildMetricsPrompt({ originalText, translatedText, comparisonText, targ
     "Scoring rules:",
     "- Scores are integers from 0 to 100.",
     "- Be conservative and practical, not flattering.",
-    "- Focus on meaning preservation, tone preservation, numeric accuracy, named entities, and omissions/additions.",
+    "- Focus on meaning preservation, target-language fluency, tone preservation, numeric accuracy, named entities, and omissions/additions.",
+    "- Perform a harsh grammar audit on the translated text itself, not just the back-translation.",
+    "- Penalize broken grammar, doubled articles, agreement errors, robotic literal phrasing, or obviously unnatural target-language syntax.",
+    '- Set "fluencyFlag" to exactly one of: "PASS", "FAIL - <brief reason>", or "Requires human review".',
     "- If there are no important numbers or named entities, still provide a score and explain briefly.",
     "- Keep each note to one short sentence.",
     "- Keep summary to 2-4 sentences.",
@@ -2066,6 +2203,9 @@ function parseMetricsReport(responseText) {
     overallNote: normalizeMetricsNote(parsed.overallNote, "Overall quality estimate from original vs back-translation."),
     intentScore: normalizeMetricsScore(parsed.intentScore),
     intentNote: normalizeMetricsNote(parsed.intentNote, "How well the intended meaning survived translation."),
+    fluencyScore: normalizeMetricsScore(parsed.fluencyScore),
+    fluencyNote: normalizeMetricsNote(parsed.fluencyNote, "How natural and grammatically correct the translated text sounds in the target language."),
+    fluencyFlag: normalizeMetricsNote(parsed.fluencyFlag, "Requires human review"),
     toneScore: normalizeMetricsScore(parsed.toneScore),
     toneNote: normalizeMetricsNote(parsed.toneNote, "How closely the style and emphasis matched."),
     numericScore: normalizeMetricsScore(parsed.numericScore),
@@ -2095,6 +2235,9 @@ function parseMetricsJsonWithFallback(jsonText) {
     overallNote: extractStringField(jsonText, "overallNote"),
     intentScore: extractNumericField(jsonText, "intentScore"),
     intentNote: extractStringField(jsonText, "intentNote"),
+    fluencyScore: extractNumericField(jsonText, "fluencyScore"),
+    fluencyNote: extractStringField(jsonText, "fluencyNote"),
+    fluencyFlag: extractStringField(jsonText, "fluencyFlag"),
     toneScore: extractNumericField(jsonText, "toneScore"),
     toneNote: extractStringField(jsonText, "toneNote"),
     numericScore: extractNumericField(jsonText, "numericScore"),

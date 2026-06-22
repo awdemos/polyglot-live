@@ -48,6 +48,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "OFFSCREEN_RECORD_PREVIEW") {
+    getPipelineOrThrow(message.tabId)
+      .previewReplayRecording()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message?.type === "OFFSCREEN_RECORD_STATE") {
     const pipeline = pipelines.get(message.tabId);
     sendResponse(
@@ -158,6 +166,7 @@ class TabAudioPipeline {
     this.replayRecorderChunks = [];
     this.replayRecordingBlob = null;
     this.replayRecordingMimeType = "";
+    this.replayRecordingMp3Blob = null;
     this.pendingPcm16 = new Int16Array(0);
     this.playbackCursorTime = 0;
     this.session = null;
@@ -285,6 +294,7 @@ class TabAudioPipeline {
     this.replayRecorderChunks = [];
     this.replayRecordingBlob = null;
     this.replayRecordingMimeType = "";
+    this.replayRecordingMp3Blob = null;
     this.replayCaptureDestination = null;
     this.pendingPcm16 = new Int16Array(0);
     this.playbackCursorTime = 0;
@@ -351,6 +361,7 @@ class TabAudioPipeline {
     }
 
     this.replayRecordingBlob = null;
+    this.replayRecordingMp3Blob = null;
     this.replayRecorderChunks = [];
     this.replayRecorder = new MediaRecorder(this.replayCaptureDestination.stream, {
       mimeType: this.replayRecordingMimeType
@@ -413,15 +424,85 @@ class TabAudioPipeline {
       throw new Error("No replay recording is available yet.");
     }
 
+    const mp3Blob = await this.convertReplayRecordingToMp3();
+    const buffer = await mp3Blob.arrayBuffer();
+    return {
+      bytes: Array.from(new Uint8Array(buffer)),
+      extension: "mp3",
+      fileName: `polyglot-live_replay_tab-${this.tabId}_${buildTimestampForFile(new Date())}.mp3`,
+      hasReplay: true,
+      isRecording: false,
+      mimeType: "audio/mpeg"
+    };
+  }
+
+  async previewReplayRecording() {
+    if (this.replayRecorder?.state === "recording") {
+      throw new Error("Stop recording before replaying the saved audio.");
+    }
+
+    if (!this.replayRecordingBlob || this.replayRecordingBlob.size === 0) {
+      throw new Error("No replay recording is available yet.");
+    }
+
     const buffer = await this.replayRecordingBlob.arrayBuffer();
     return {
       bytes: Array.from(new Uint8Array(buffer)),
-      extension: "webm",
-      fileName: `polyglot-live_replay_tab-${this.tabId}_${buildTimestampForFile(new Date())}.webm`,
       hasReplay: true,
       isRecording: false,
       mimeType: this.replayRecordingMimeType || this.replayRecordingBlob.type || "audio/webm"
     };
+  }
+
+  async convertReplayRecordingToMp3() {
+    if (this.replayRecordingMp3Blob && this.replayRecordingMp3Blob.size > 0) {
+      return this.replayRecordingMp3Blob;
+    }
+
+    if (!this.replayRecordingBlob || this.replayRecordingBlob.size === 0) {
+      throw new Error("No replay recording is available yet.");
+    }
+
+    if (!globalThis.lamejs?.Mp3Encoder) {
+      throw new Error("MP3 encoder is not available in the offscreen document.");
+    }
+
+    const replayBuffer = await this.replayRecordingBlob.arrayBuffer();
+    const decodeContext = new AudioContext();
+    let audioBuffer;
+
+    try {
+      audioBuffer = await decodeContext.decodeAudioData(replayBuffer.slice(0));
+    } finally {
+      await decodeContext.close().catch(() => undefined);
+    }
+
+    const targetSampleRate = pickMp3SampleRate(audioBuffer.sampleRate);
+    const monoBuffer = await renderAudioBufferToMono(audioBuffer, targetSampleRate);
+    const monoSamples = float32ToPcm16(monoBuffer.getChannelData(0));
+    const encoder = new globalThis.lamejs.Mp3Encoder(1, targetSampleRate, 128);
+    const chunkSize = 1152;
+    const mp3Chunks = [];
+
+    for (let index = 0; index < monoSamples.length; index += chunkSize) {
+      const sampleChunk = monoSamples.subarray(index, index + chunkSize);
+      const encodedChunk = encoder.encodeBuffer(sampleChunk);
+      if (encodedChunk.length > 0) {
+        mp3Chunks.push(new Int8Array(encodedChunk));
+      }
+    }
+
+    const flushChunk = encoder.flush();
+    if (flushChunk.length > 0) {
+      mp3Chunks.push(new Int8Array(flushChunk));
+    }
+
+    this.replayRecordingMp3Blob = new Blob(mp3Chunks, { type: "audio/mpeg" });
+    emitDebug(this.tabId, "Replay recording converted to MP3", {
+      byteLength: this.replayRecordingMp3Blob.size,
+      sampleRate: targetSampleRate
+    });
+    return this.replayRecordingMp3Blob;
   }
 
   getReplayRecordingState() {
@@ -980,6 +1061,34 @@ function base64ToInt16Array(base64Value) {
 function pickReplayRecordingMimeType() {
   const candidates = ["audio/webm;codecs=opus", "audio/webm"];
   return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
+}
+
+function pickMp3SampleRate(sampleRate) {
+  const supportedRates = [44100, 48000, 32000, 24000, 22050, 16000];
+  return supportedRates.includes(sampleRate) ? sampleRate : 44100;
+}
+
+async function renderAudioBufferToMono(audioBuffer, targetSampleRate) {
+  const frameCount = Math.max(1, Math.ceil(audioBuffer.duration * targetSampleRate));
+  if (audioBuffer.numberOfChannels === 1 && audioBuffer.sampleRate === targetSampleRate) {
+    return audioBuffer;
+  }
+
+  const offlineContext = new OfflineAudioContext(1, frameCount, targetSampleRate);
+  const source = offlineContext.createBufferSource();
+  source.buffer = audioBuffer;
+  const splitter = offlineContext.createChannelSplitter(audioBuffer.numberOfChannels);
+  const mergerGain = offlineContext.createGain();
+  mergerGain.gain.value = 1 / Math.max(1, audioBuffer.numberOfChannels);
+
+  source.connect(splitter);
+  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+    splitter.connect(mergerGain, channelIndex, 0);
+  }
+
+  mergerGain.connect(offlineContext.destination);
+  source.start(0);
+  return offlineContext.startRendering();
 }
 
 function buildTimestampForFile(date) {

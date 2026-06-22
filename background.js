@@ -101,22 +101,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "EXPORT_REPLAY_RECORDING") {
     const tabId = resolveTabIdFromMessage(message, sender);
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId })
-      .then((payload) => {
-        updateReplayState(tabId, { ...payload, hasReplay: true, isRecording: false });
-        sendResponse(payload);
-      })
+    exportReplayRecording(tabId)
+      .then((payload) => sendResponse(payload))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "PREVIEW_REPLAY_RECORDING") {
+    const tabId = resolveTabIdFromMessage(message, sender);
+    previewReplayRecording(tabId)
+      .then((payload) => sendResponse(payload))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === "GET_REPLAY_RECORDING_STATE") {
     const tabId = resolveTabIdFromMessage(message, sender);
-    forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE", tabId })
-      .then((payload) => {
-        updateReplayState(tabId, payload);
-        sendResponse(payload);
-      })
+    getReplayRecordingState(tabId)
+      .then((payload) => sendResponse(payload))
       .catch(() => sendResponse({ ok: true, hasReplay: false, isRecording: false }));
     return true;
   }
@@ -202,6 +204,7 @@ async function startTranslationFromTab(tabId, requestedOptions = null) {
   try {
     const translationPrefs = requestedOptions || (await getTranslationPreferences());
     const sessionState = getSession(tabId);
+    resetReplayState(sessionState);
     resetSessionTranscripts(sessionState);
     updateSessionState(tabId, "starting", `Starting translation for ${translationPrefs.targetLanguage}...`);
 
@@ -308,13 +311,14 @@ async function stopTranslation(tabId, { suppressStatusBroadcast = false } = {}) 
 
   await ensureOffscreenDocument();
   try {
+    await captureReplaySnapshotBeforeStop(tabId, sessionState);
     await chrome.runtime.sendMessage({ type: "OFFSCREEN_STOP", tabId }).catch((error) => {
       console.warn("[polyglot-live/background] offscreen stop failed", { tabId, error });
       return { ok: false };
     });
   } finally {
     await resumePausedTabMedia(tabId);
-    clearSessionRuntime(sessionState);
+    clearSessionRuntime(sessionState, { preserveReplay: true });
     stoppingTabs.delete(tabId);
   }
 
@@ -388,6 +392,99 @@ async function updateOriginalAudioMix(tabId, originalAudioMixPercent) {
   }
 
   return { originalAudioMixPercent: normalizedPercent };
+}
+
+async function getReplayRecordingState(tabId) {
+  const sessionState = getSession(tabId);
+
+  if (!sessionState.activeSession) {
+    return {
+      ok: true,
+      hasReplay: Boolean(sessionState.replay.hasReplay),
+      isRecording: false,
+      mimeType: sessionState.replay.previewMimeType || null
+    };
+  }
+
+  const response = await forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE", tabId });
+  updateReplayState(tabId, response);
+  return response;
+}
+
+async function previewReplayRecording(tabId) {
+  const sessionState = getSession(tabId);
+
+  if (!sessionState.activeSession && sessionState.replay.previewBytes?.length) {
+    return {
+      ok: true,
+      bytes: sessionState.replay.previewBytes,
+      hasReplay: true,
+      isRecording: false,
+      mimeType: sessionState.replay.previewMimeType || "audio/webm"
+    };
+  }
+
+  const payload = await forwardToOffscreen({ type: "OFFSCREEN_RECORD_PREVIEW", tabId });
+  if (payload?.ok !== false) {
+    cacheReplayPreview(sessionState, payload);
+    updateReplayState(tabId, { ...payload, hasReplay: true, isRecording: false });
+  }
+  return payload;
+}
+
+async function exportReplayRecording(tabId) {
+  const sessionState = getSession(tabId);
+
+  if (!sessionState.activeSession && sessionState.replay.exportBytes?.length) {
+    return {
+      ok: true,
+      bytes: sessionState.replay.exportBytes,
+      extension: sessionState.replay.exportExtension || "mp3",
+      fileName:
+        sessionState.replay.exportFileName ||
+        `polyglot-live_replay_tab-${tabId}_${buildTimestampForFile(new Date())}.${sessionState.replay.exportExtension || "mp3"}`,
+      hasReplay: true,
+      isRecording: false,
+      mimeType: sessionState.replay.exportMimeType || "audio/mpeg"
+    };
+  }
+
+  const payload = await forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId });
+  if (payload?.ok !== false) {
+    cacheReplayExport(sessionState, payload);
+    updateReplayState(tabId, { ...payload, hasReplay: true, isRecording: false });
+  }
+  return payload;
+}
+
+async function captureReplaySnapshotBeforeStop(tabId, sessionState) {
+  try {
+    const replayState = await forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE", tabId });
+    updateReplayState(tabId, replayState);
+
+    if (!replayState?.hasReplay || replayState?.isRecording) {
+      return;
+    }
+
+    const [previewPayload, exportPayload] = await Promise.all([
+      forwardToOffscreen({ type: "OFFSCREEN_RECORD_PREVIEW", tabId }).catch(() => null),
+      forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId }).catch(() => null)
+    ]);
+
+    if (previewPayload?.ok !== false) {
+      cacheReplayPreview(sessionState, previewPayload);
+    }
+
+    if (exportPayload?.ok !== false) {
+      cacheReplayExport(sessionState, exportPayload);
+    }
+
+    sessionState.replay.hasReplay = Boolean(
+      sessionState.replay.previewBytes?.length || sessionState.replay.exportBytes?.length || replayState?.hasReplay
+    );
+  } catch (error) {
+    console.warn("[polyglot-live/background] unable to preserve replay before stop", { tabId, error });
+  }
 }
 
 async function forwardToOffscreen(message) {
@@ -544,7 +641,13 @@ function createSessionState(tabId) {
     pendingResumeTimeoutId: null,
     replay: {
       hasReplay: false,
-      isRecording: false
+      isRecording: false,
+      exportBytes: null,
+      exportExtension: null,
+      exportFileName: null,
+      exportMimeType: null,
+      previewBytes: null,
+      previewMimeType: null
     },
     inputSource: DEFAULT_INPUT_SOURCE,
     originalAudioMixPercent: DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
@@ -560,7 +663,7 @@ function createSessionState(tabId) {
   };
 }
 
-function clearSessionRuntime(sessionState) {
+function clearSessionRuntime(sessionState, { preserveReplay = false } = {}) {
   finalizeCostRun(sessionState.tabId);
   if (sessionState.pendingResumeTimeoutId) {
     clearTimeout(sessionState.pendingResumeTimeoutId);
@@ -570,10 +673,11 @@ function clearSessionRuntime(sessionState) {
   sessionState.awaitingTranslatedAudioStart = false;
   sessionState.didPauseSourceMedia = false;
   sessionState.startedAt = null;
-  sessionState.replay = {
-    hasReplay: false,
-    isRecording: false
-  };
+  if (preserveReplay) {
+    sessionState.replay.isRecording = false;
+  } else {
+    resetReplayState(sessionState);
+  }
 }
 
 function resetSessionTranscripts(sessionState) {
@@ -653,9 +757,42 @@ function updateReplayState(tabId, payload) {
   }
 
   const sessionState = getSession(tabId);
+  sessionState.replay.hasReplay = Boolean(payload?.hasReplay) || Boolean(sessionState.replay.previewBytes?.length);
+  sessionState.replay.isRecording = Boolean(payload?.isRecording);
+}
+
+function cacheReplayPreview(sessionState, payload) {
+  if (!payload?.bytes?.length) {
+    return;
+  }
+
+  sessionState.replay.previewBytes = payload.bytes;
+  sessionState.replay.previewMimeType = payload.mimeType || "audio/webm";
+  sessionState.replay.hasReplay = true;
+}
+
+function cacheReplayExport(sessionState, payload) {
+  if (!payload?.bytes?.length) {
+    return;
+  }
+
+  sessionState.replay.exportBytes = payload.bytes;
+  sessionState.replay.exportExtension = payload.extension || "mp3";
+  sessionState.replay.exportFileName = payload.fileName || null;
+  sessionState.replay.exportMimeType = payload.mimeType || "audio/mpeg";
+  sessionState.replay.hasReplay = true;
+}
+
+function resetReplayState(sessionState) {
   sessionState.replay = {
-    hasReplay: Boolean(payload?.hasReplay),
-    isRecording: Boolean(payload?.isRecording)
+    hasReplay: false,
+    isRecording: false,
+    exportBytes: null,
+    exportExtension: null,
+    exportFileName: null,
+    exportMimeType: null,
+    previewBytes: null,
+    previewMimeType: null
   };
 }
 
@@ -736,6 +873,16 @@ function normalizeOriginalAudioMixPercent(value) {
 
 function normalizeInputSource(value) {
   return value === "microphone" ? "microphone" : DEFAULT_INPUT_SOURCE;
+}
+
+function buildTimestampForFile(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${year}-${month}-${day}_${hours}${minutes}${seconds}`;
 }
 
 function startCostRun(tabId, startedAt) {
