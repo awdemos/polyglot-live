@@ -99,6 +99,9 @@ const metricsIdleMessage = "Use local AI after the session to score the translat
 const metricsWaitingForComparisonMessage = "Start comparison and let it finish before generating local-AI metrics.";
 const COMPARISON_REFRESH_DEBOUNCE_MS = 2200;
 const COMPARISON_MIN_DELTA_CHARS = 48;
+const COMPARISON_READY_TIMEOUT_MS = 15000;
+const COMPARISON_TRANSLATE_TIMEOUT_MS = 20000;
+const COMPARISON_TRANSLATE_CHUNK_CHARS = 700;
 const BROWSER_TRANSLATOR_SUPPORTED_CODES = new Set([
   "ar", "bg", "bn", "cs", "da", "de", "el", "en", "es", "fi", "fr", "hi", "hr", "hu", "id", "it",
   "iw", "ja", "kn", "ko", "lt", "mr", "nl", "no", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "ta",
@@ -1725,6 +1728,121 @@ function queueComparisonRefresh() {
   return queueComparisonRefreshInternal({ force: false });
 }
 
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      }
+    );
+  });
+}
+
+function splitTextIntoTranslationChunks(text, maxChars = COMPARISON_TRANSLATE_CHUNK_CHARS) {
+  const normalizedText = normalizeWhitespace(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  if (normalizedText.length <= maxChars) {
+    return [normalizedText];
+  }
+
+  const sentenceLikeParts = normalizedText.match(/[^.!?\n]+(?:[.!?\n]+|$)/g) || [normalizedText];
+  const chunks = [];
+  let currentChunk = "";
+
+  for (const rawPart of sentenceLikeParts) {
+    const part = normalizeWhitespace(rawPart);
+    if (!part) {
+      continue;
+    }
+
+    if (part.length > maxChars) {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+        currentChunk = "";
+      }
+
+      let remaining = part;
+      while (remaining.length > maxChars) {
+        let splitIndex = remaining.lastIndexOf(" ", maxChars);
+        if (splitIndex < Math.floor(maxChars * 0.5)) {
+          splitIndex = maxChars;
+        }
+        chunks.push(remaining.slice(0, splitIndex).trim());
+        remaining = remaining.slice(splitIndex).trim();
+      }
+      if (remaining) {
+        currentChunk = remaining;
+      }
+      continue;
+    }
+
+    const candidate = currentChunk ? `${currentChunk} ${part}` : part;
+    if (candidate.length > maxChars) {
+      if (currentChunk) {
+        chunks.push(currentChunk);
+      }
+      currentChunk = part;
+    } else {
+      currentChunk = candidate;
+    }
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks.filter(Boolean);
+}
+
+async function translateComparisonInChunks(translator, translatedText, generationToken) {
+  const chunks = splitTextIntoTranslationChunks(translatedText);
+  const translatedChunks = [];
+
+  emitPanelDebug("Browser comparison chunk plan prepared", {
+    chunkCount: chunks.length,
+    translatedLength: translatedText.length
+  });
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    if (generationToken !== comparisonGenerationToken) {
+      throw new Error("Comparison request superseded by a newer update.");
+    }
+
+    const chunkNumber = index + 1;
+    const chunk = chunks[index];
+    updateComparisonStatus(
+      chunks.length > 1
+        ? `Processing comparison... please wait... ${chunkNumber}/${chunks.length}`
+        : "Processing comparison... please wait..."
+    );
+    emitPanelDebug("Browser comparison chunk translation started", {
+      chunkNumber,
+      chunkCount: chunks.length,
+      chunkLength: chunk.length
+    });
+    const translatedChunk = await withTimeout(
+      translator.translate(chunk),
+      COMPARISON_TRANSLATE_TIMEOUT_MS,
+      `Browser comparison chunk ${chunkNumber}`
+    );
+    translatedChunks.push(normalizeWhitespace(translatedChunk));
+  }
+
+  return normalizeWhitespace(translatedChunks.join(" "));
+}
+
 function queueComparisonRefreshInternal({ force = false } = {}) {
   if (!comparisonEnabled && !force) {
     return;
@@ -1914,7 +2032,11 @@ async function refreshComparisonTranscript() {
 
     setComparisonWorking(true, "comparison translation in progress", "Processing comparison... please wait...");
 
-    const backTranslatedText = normalizeWhitespace(await translator.translate(translatedText));
+    emitPanelDebug("Browser comparison translation started", {
+      sourceLanguageCode,
+      translatedLength: translatedText.length
+    });
+    const backTranslatedText = await translateComparisonInChunks(translator, translatedText, currentToken);
     if (currentToken !== comparisonGenerationToken) {
       setComparisonWorking(false, "stale comparison generation token");
       return;
@@ -1928,6 +2050,9 @@ async function refreshComparisonTranscript() {
     comparisonTranscriptOutput.className = "";
     comparisonTranscriptOutput.scrollTop = comparisonTranscriptOutput.scrollHeight;
     comparisonLastRenderedText = translatedText;
+    emitPanelDebug("Browser comparison translation completed", {
+      outputLength: backTranslatedText.length
+    });
     setComparisonWorking(false, "comparison translation complete");
   } catch (error) {
     emitPanelDebug("Browser comparison translation failed", {
@@ -2049,7 +2174,16 @@ async function ensureComparisonTranslator(sourceLanguage, targetLanguage, { requ
           ? "Finalizing browser-AI comparison setup..."
           : "Preparing browser-AI comparison... please wait..."
       );
-      await comparisonTranslator.ready;
+      try {
+        await withTimeout(comparisonTranslator.ready, COMPARISON_READY_TIMEOUT_MS, "Browser comparison setup");
+      } catch (error) {
+        emitPanelDebug("Browser comparison ready wait timed out; proceeding with translator anyway", {
+          message: error?.message || String(error),
+          sourceLanguage,
+          targetLanguage
+        });
+        updateComparisonStatus("Browser-AI comparison is taking longer than expected. Attempting translation...");
+      }
     }
     return comparisonTranslator;
   } catch (error) {
