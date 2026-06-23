@@ -657,6 +657,7 @@ function createSessionState(tabId) {
     },
     inputSource: DEFAULT_INPUT_SOURCE,
     originalAudioMixPercent: DEFAULT_ORIGINAL_AUDIO_MIX_PERCENT,
+    hasTranslatedAudioStarted: false,
     sourceMediaResumeDelaySeconds: DEFAULT_SOURCE_MEDIA_RESUME_DELAY_SECONDS,
     startedAt: null,
     statusMessage: DEFAULT_STATUS_MESSAGE,
@@ -678,6 +679,7 @@ function clearSessionRuntime(sessionState, { preserveReplay = false } = {}) {
   sessionState.activeSession = false;
   sessionState.awaitingTranslatedAudioStart = false;
   sessionState.didPauseSourceMedia = false;
+  sessionState.hasTranslatedAudioStarted = false;
   sessionState.startedAt = null;
   if (preserveReplay) {
     sessionState.replay.isRecording = false;
@@ -713,6 +715,7 @@ function buildSessionSnapshot(sessionState) {
     inputSource: sessionState.inputSource,
     isStarting: startingTabs.has(sessionState.tabId),
     isStopping: stoppingTabs.has(sessionState.tabId),
+    hasTranslatedAudioStarted: sessionState.hasTranslatedAudioStarted,
     originalAudioMixPercent: sessionState.originalAudioMixPercent,
     phase: sessionState.phase,
     replay: { ...sessionState.replay },
@@ -751,6 +754,7 @@ function handleSessionEvent(message) {
   }
 
   if (message.event === "translated_audio_started") {
+    sessionState.hasTranslatedAudioStarted = true;
     void resumePausedTabMedia(tabId);
   }
 

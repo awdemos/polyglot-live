@@ -18,7 +18,8 @@
           <span id="buildVersion" class="build-version">v0.0.0</span>
           <span id="micIndicator" class="mic-indicator" hidden>
             <span class="mic-indicator-dot"></span>
-            <span>Mic live</span>
+            <span id="micIndicatorLabel">Session live</span>
+            <span id="micReadyDot" class="mic-ready-dot" hidden aria-label="Translation ready"></span>
           </span>
         </div>
         <p class="lede">Play the tab audio first, then press Start here to begin translation. Nothing auto-starts.</p>
@@ -38,6 +39,7 @@
           <div class="accordion-summary-actions">
             <button id="summaryStartButton" type="button" class="summary-action-button">Start</button>
             <button id="summaryStopButton" type="button" class="summary-action-button secondary">Stop</button>
+            <button id="summaryDemoButton" type="button" class="summary-action-button secondary">Demo</button>
           </div>
         </summary>
         <div class="accordion-body controls-body">

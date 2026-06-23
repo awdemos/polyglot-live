@@ -135,9 +135,26 @@ h1 {
   animation: recording-pulse 1s ease-in-out infinite;
 }
 
+.mic-ready-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.16);
+}
+
+.mic-ready-dot[hidden] {
+  display: none;
+}
+
 [data-theme="dark"] .mic-indicator {
   background: rgba(248, 113, 113, 0.16);
   color: #fca5a5;
+}
+
+[data-theme="dark"] .mic-ready-dot {
+  background: #4ade80;
+  box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18);
 }
 
 .lede {

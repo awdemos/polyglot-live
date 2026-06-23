@@ -15,6 +15,7 @@ const startButton = document.querySelector("#startButton");
 const stopButton = document.querySelector("#stopButton");
 const summaryStartButton = document.querySelector("#summaryStartButton");
 const summaryStopButton = document.querySelector("#summaryStopButton");
+const summaryDemoButton = document.querySelector("#summaryDemoButton");
 const sourceResumeDelaySecondsInput = document.querySelector("#sourceResumeDelaySeconds");
 const originalAudioMixPercentInput = document.querySelector("#originalAudioMixPercent");
 const originalAudioMixPercentValue = document.querySelector("#originalAudioMixPercentValue");
@@ -93,6 +94,8 @@ const sessionCostValue = document.querySelector("#sessionCostValue");
 const sessionCostMeta = document.querySelector("#sessionCostMeta");
 const buildVersion = document.querySelector("#buildVersion");
 const micIndicator = document.querySelector("#micIndicator");
+const micIndicatorLabel = document.querySelector("#micIndicatorLabel");
+const micReadyDot = document.querySelector("#micReadyDot");
 const originalPlaceholder = "Original transcript will appear here as speech is detected.";
 const comparisonPlaceholder = "Browser-AI comparison will appear here when back-translation is available.";
 const metricsIdleMessage = "Use local AI after the session to score the translation against the original and back-translation.";
@@ -122,6 +125,8 @@ let currentTabId = null;
 let currentSessionStartedAt = null;
 let currentEstimatedCostMs = 0;
 let currentSessionInputSource = DEFAULT_INPUT_SOURCE;
+let currentSessionHasTranslatedAudioStarted = false;
+let currentSessionTranslatedAudioMs = 0;
 let microphonePermissionState = "unknown";
 let microphonePermissionWindowId = null;
 let comparisonTranslator = null;
@@ -139,8 +144,12 @@ let metricsLanguageModelReady = null;
 let metricsHasResults = false;
 let metricsIsWorking = false;
 let activeWorkflowTab = "live";
+let demoCycleActive = false;
+let demoCycleToken = 0;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
+const DEMO_LANGUAGE_AUDIO_TARGET_MS = 60000;
+const DEMO_READY_TIMEOUT_MS = 30000;
 
 initialize().catch((error) => {
   updateStatus("error", error.message);
@@ -331,15 +340,25 @@ summaryStopButton.addEventListener("click", async (event) => {
   await stopTranslation();
 });
 
+summaryDemoButton.addEventListener("click", async (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  if (demoCycleActive) {
+    cancelDemoCycle("Demo canceled. Translation continues.");
+    return;
+  }
+  await startDemoCycle();
+});
+
 async function startTranslation() {
   if (!currentTabId) {
     updateStatus("error", "No active browser tab is available for translation.");
-    return;
+    return false;
   }
 
   if (getSelectedInputSource() === "microphone" && microphonePermissionState !== "granted") {
     updateStatus("error", "Grant microphone access in the side panel before starting microphone translation.");
-    return;
+    return false;
   }
 
   const selectedTargetLanguage = getSelectedTargetLanguageCode();
@@ -361,7 +380,7 @@ async function startTranslation() {
   if (!isReady) {
     setBusy(false);
     updateStatus("error", "Auth readiness check failed. Fix the auth panel details before starting.");
-    return;
+    return false;
   }
 
   const response = await chrome.runtime.sendMessage({
@@ -379,25 +398,28 @@ async function startTranslation() {
       updateStatus("error", "Microphone permission was dismissed. Click Grant microphone access and allow the mic.");
       microphonePermissionState = "denied";
       updateMicrophoneAccessUi();
-      return;
+      return false;
     }
 
     if ((response?.error || "").includes("already starting")) {
       updateStatus("starting", "A translation session is already starting. Please wait a moment.");
       await syncSessionState();
-      return;
+      return false;
     }
 
     updateStatus("error", response?.error ?? "Unable to start translation.");
-    return;
+    return false;
   }
 
   lastStartedTargetLanguage = selectedTargetLanguage;
   currentSessionInputSource = getSelectedInputSource();
+  currentSessionHasTranslatedAudioStarted = false;
+  currentSessionTranslatedAudioMs = 0;
   currentSessionStartedAt = typeof response.startedAt === "number" && Number.isFinite(response.startedAt)
     ? response.startedAt
     : Date.now();
   updateStatus("running", `Session started on tab ${response.tabId}.`);
+  return true;
 }
 
 async function stopTranslation() {
@@ -406,6 +428,7 @@ async function stopTranslation() {
     return;
   }
 
+  cancelDemoCycle();
   setBusy(true);
 
   if (replayIsRecording) {
@@ -437,6 +460,8 @@ async function stopTranslation() {
   }
 
   lastStartedTargetLanguage = null;
+  currentSessionHasTranslatedAudioStarted = false;
+  currentSessionTranslatedAudioMs = 0;
   updateStatus("idle", "Translation stopped. Session transcript preserved for review.");
 }
 
@@ -475,6 +500,11 @@ chrome.runtime.onMessage.addListener((message) => {
     applyTranslatedAudioTiming(message.payload);
   }
 
+  if (message.event === "translated_audio_started") {
+    currentSessionHasTranslatedAudioStarted = true;
+    updateMicIndicator();
+  }
+
   if (message.event === "transcripts_cleared") {
     resetTranscriptOutputs();
   }
@@ -489,6 +519,7 @@ function setBusy(isBusy) {
     stopButton.disabled = !isBusy;
   }
   summaryStopButton.disabled = !isBusy;
+  summaryDemoButton.disabled = isBusy || (getSelectedInputSource() !== "tab" && !demoCycleActive);
 }
 
 function updateStatus(phase, message) {
@@ -538,12 +569,18 @@ async function initialize() {
   inputSourceInput.addEventListener("change", () => {
     updateInputSourcePresentation(getSelectedInputSource());
     void persistTranslationPrefs();
+    syncButtonsForPhase(phaseBadge.textContent || "idle");
   });
 
-  targetLanguageInput.addEventListener("change", () => {
+  targetLanguageInput.addEventListener("change", async () => {
     updateTargetLanguagePresentation(getSelectedTargetLanguageCode());
     resetTranscriptOutputs();
-    void persistTranslationPrefs();
+    await persistTranslationPrefs();
+    if (shouldPseudoMorphSession()) {
+      const sourceLabel = getSelectedInputSource() === "microphone" ? "microphone" : "tab";
+      updateStatus("starting", `Switching ${sourceLabel} translation to ${getSelectedTargetLanguageLabel()}...`);
+      await startTranslation();
+    }
   });
 
   sourceResumeDelaySecondsInput.addEventListener("change", () => {
@@ -1269,11 +1306,15 @@ function appendTranslatedTranscriptPlain(text) {
 }
 
 function applyTranslatedAudioTiming(payload) {
+  const durationMs = Math.max(0, Number(payload?.durationMs || 0));
+  if (durationMs) {
+    currentSessionTranslatedAudioMs += durationMs;
+  }
+
   if (!ENABLE_WORD_HIGHLIGHTING) {
     return;
   }
 
-  const durationMs = Math.max(0, Number(payload?.durationMs || 0));
   if (!durationMs) {
     return;
   }
@@ -1559,6 +1600,10 @@ async function syncSessionState() {
 
   currentSessionStartedAt =
     typeof response.startedAt === "number" && Number.isFinite(response.startedAt) ? response.startedAt : null;
+  currentSessionHasTranslatedAudioStarted = Boolean(response.hasTranslatedAudioStarted);
+  if (!currentSessionHasTranslatedAudioStarted) {
+    currentSessionTranslatedAudioMs = 0;
+  }
   applyTranscriptSnapshot(response.transcripts);
   updateStatus(response.phase || "idle", response.statusMessage || "Ready to start a translation session.");
 }
@@ -1606,6 +1651,7 @@ function syncButtonsForPhase(phase) {
     stopButton.disabled = !(isStarting || isRunning);
   }
   summaryStopButton.disabled = !(isStarting || isRunning);
+  summaryDemoButton.disabled = getSelectedInputSource() !== "tab" && !demoCycleActive;
   syncRecordingButtonsForState();
 }
 
@@ -1622,6 +1668,118 @@ function syncRecordingButtonsForState() {
   updateRecordingIndicator();
 }
 
+function shouldPseudoMorphSession() {
+  const phase = phaseBadge.textContent || "idle";
+  return (
+    Boolean(currentTabId) &&
+    Boolean(currentSessionStartedAt) &&
+    (getSelectedInputSource() === "microphone" || getSelectedInputSource() === "tab") &&
+    currentSessionInputSource === getSelectedInputSource() &&
+    isCostTrackingPhase(phase)
+  );
+}
+
+function setDemoCycleActive(isActive) {
+  demoCycleActive = Boolean(isActive);
+  summaryDemoButton.textContent = demoCycleActive ? "Stop demo" : "Demo";
+  syncButtonsForPhase(phaseBadge.textContent || "idle");
+}
+
+function cancelDemoCycle(statusMessageText = null) {
+  if (!demoCycleActive && demoCycleToken === 0) {
+    return;
+  }
+  demoCycleToken += 1;
+  setDemoCycleActive(false);
+  if (statusMessageText) {
+    updateStatus(phaseBadge.textContent || "idle", statusMessageText);
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForDemoTranslatedAudioStart(token) {
+  const startedAt = Date.now();
+  while (token === demoCycleToken) {
+    if (currentSessionHasTranslatedAudioStarted) {
+      return true;
+    }
+    if (Date.now() - startedAt > DEMO_READY_TIMEOUT_MS) {
+      throw new Error("Timed out waiting for translated audio during demo.");
+    }
+    await delay(150);
+  }
+  return false;
+}
+
+async function waitForDemoTranslatedAudioMs(token, targetMs) {
+  const startMarker = currentSessionTranslatedAudioMs;
+  while (token === demoCycleToken) {
+    if (currentSessionTranslatedAudioMs - startMarker >= targetMs) {
+      return true;
+    }
+    await delay(150);
+  }
+  return false;
+}
+
+async function startDemoCycle() {
+  if (!currentTabId) {
+    updateStatus("error", "No active browser tab is available for demo mode.");
+    return;
+  }
+
+  if (getSelectedInputSource() !== "tab") {
+    updateStatus("error", "Demo mode currently supports tab audio only.");
+    return;
+  }
+
+  const token = demoCycleToken + 1;
+  demoCycleToken = token;
+  setDemoCycleActive(true);
+
+  try {
+    const currentLanguageCode = normalizeTargetLanguageCode(getSelectedTargetLanguageCode());
+    const demoCandidates = SUPPORTED_TRANSLATION_LANGUAGES.filter(
+      (language) => normalizeTargetLanguageCode(language.code) !== currentLanguageCode
+    );
+    const pool = demoCandidates.length > 0 ? demoCandidates : SUPPORTED_TRANSLATION_LANGUAGES;
+    const language = pool[Math.floor(Math.random() * pool.length)];
+
+    targetLanguageInput.value = normalizeTargetLanguageCode(language.code);
+    updateTargetLanguagePresentation(language.code);
+    resetTranscriptOutputs();
+    await persistTranslationPrefs();
+    updateStatus("starting", `Demo picked ${language.label}. Waiting for translated audio...`);
+
+    const started = await startTranslation();
+    if (!started) {
+      throw new Error(`Unable to start demo for ${language.label}.`);
+    }
+
+    const ready = await waitForDemoTranslatedAudioStart(token);
+    if (!ready) {
+      return;
+    }
+
+    currentSessionTranslatedAudioMs = 0;
+    updateStatus("running", `Demo live in ${language.label}. Counting 60 seconds of translated audio...`);
+    const held = await waitForDemoTranslatedAudioMs(token, DEMO_LANGUAGE_AUDIO_TARGET_MS);
+    if (!held) {
+      return;
+    }
+
+    setDemoCycleActive(false);
+    await stopTranslation();
+    updateStatus("idle", `Demo complete for ${language.label}. Press Demo again for another random language.`);
+  } catch (error) {
+    setDemoCycleActive(false);
+    updateStatus("error", error?.message || "Demo mode failed.");
+  }
+}
+
 async function refreshActiveTabContext() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const nextTabId = tab?.id || null;
@@ -1636,6 +1794,8 @@ async function refreshActiveTabContext() {
   stopReplayPreview();
   lastStartedTargetLanguage = null;
   currentSessionStartedAt = null;
+  currentSessionHasTranslatedAudioStarted = false;
+  currentSessionTranslatedAudioMs = 0;
   currentSessionInputSource = getSelectedInputSource();
   resetTranscriptOutputs();
 
@@ -1644,6 +1804,8 @@ async function refreshActiveTabContext() {
     updateStatus("idle", "No active browser tab is available for translation.");
     replayIsRecording = false;
     replayHasSavedCapture = false;
+    currentSessionHasTranslatedAudioStarted = false;
+    currentSessionTranslatedAudioMs = 0;
     syncRecordingButtonsForState();
     return;
   }
@@ -2680,8 +2842,21 @@ function isCostTrackingPhase(phase) {
 
 function updateMicIndicator() {
   const phase = phaseBadge.textContent || "idle";
-  const micIsActive = currentSessionInputSource === "microphone" && isCostTrackingPhase(phase);
-  micIndicator.hidden = !micIsActive;
+  const hasActiveSourceSession =
+    (currentSessionInputSource === "microphone" || currentSessionInputSource === "tab") && isCostTrackingPhase(phase);
+  const sessionIsReady =
+    (currentSessionInputSource === "microphone" || currentSessionInputSource === "tab") &&
+    currentSessionHasTranslatedAudioStarted;
+  micIndicator.hidden = !hasActiveSourceSession;
+  micReadyDot.hidden = !sessionIsReady;
+  if (hasActiveSourceSession) {
+    const languageLabel = getSelectedTargetLanguageLabel();
+    const sourceLabel = currentSessionInputSource === "microphone" ? "Mic" : "Tab";
+    micIndicatorLabel.textContent =
+      phase === "starting" || phase === "connecting" || phase === "reconnecting"
+        ? `${sourceLabel} switching ${languageLabel}`
+        : `${sourceLabel} live ${languageLabel}`;
+  }
 }
 
 function updateMicrophoneAccessUi() {
