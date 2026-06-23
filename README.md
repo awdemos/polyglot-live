@@ -6,7 +6,7 @@
 
 [Watch the demo video on YouTube](https://youtu.be/X8DJ7oLaCfU)
 
-`polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation with:
+`polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation suitable for live tranlation of any audio in a briwser tab:
 
 - a side panel for controls and live status
 - a readiness check that verifies local token provisioning before live start
