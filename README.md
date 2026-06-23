@@ -6,7 +6,7 @@
 
 [Watch the demo video on YouTube](https://youtu.be/X8DJ7oLaCfU)
 
-`polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation suitable for live tranlation of any audio in a briwser tab:
+`polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation suitable for live translation of audio presented in the browser tab, with:
 
 - a side panel for controls and live status
 - a readiness check that verifies local token provisioning before live start
@@ -138,7 +138,7 @@ If you are packaging this for testers, adding 2 to 4 screenshots to the repo or 
 
 Before using the extension, make sure you have:
 
-1. Chrome with Developer mode available in `chrome://extensions`
+1. Google Chrome desktop with Developer mode available in `chrome://extensions`
 2. Node.js installed locally
 3. A Gemini API key from Google AI Studio
 4. The project dependency installed from the repo root:
@@ -149,6 +149,13 @@ npm install
 ```
 
 If you already ran setup in this folder, `@google/genai` should already be present under `node_modules`.
+
+Chrome version guidance:
+
+- use current desktop Chrome stable whenever possible
+- `Comparison` and `Metrics` depend on Chrome built-in AI APIs and should be treated as Chrome 138+ features
+- `Translator API` support for the browser-native comparison flow is desktop-only
+- `Metrics` also depends on Chrome local AI hardware and storage requirements on the tester's machine
 
 ## Create a Gemini API key
 

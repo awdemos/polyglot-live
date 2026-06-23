@@ -4,7 +4,7 @@ These instructions are for a friend who received a `.zip` copy of `polyglot-live
 
 ## What this is
 
-`polyglot-live` is a Chrome extension that can:
+`polyglot-live` is a Chrome extension for real-time tab-audio translation suitable for live translation of audio presented in the browser tab. It can:
 
 - translate live browser tab audio
 - translate live microphone input
@@ -37,9 +37,15 @@ Known expectations:
 
 You will need:
 
-1. Google Chrome
+1. Google Chrome desktop
 2. Node.js installed on your computer
 3. A Gemini API key from Google AI Studio
+
+Chrome version guidance:
+
+- use current desktop Chrome stable whenever possible
+- `Comparison` and `Metrics` should be treated as Chrome 138+ features because they rely on Chrome built-in AI
+- `Metrics` also depends on device support for Chrome local AI
 
 ## Get a Gemini API key
 
