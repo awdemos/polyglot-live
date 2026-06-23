@@ -42,6 +42,7 @@ This repo now includes a real Live Translate WebSocket transport and a working l
 
 The current build matches the documented Gemini Live Translate contract more closely and is working as a local developer build:
 
+- product name: `Gemini 3.5 Live Translate`
 - model: `gemini-3.5-live-translate-preview`
 - input audio: raw 16-bit PCM, 16kHz, mono, little-endian
 - output audio: raw 16-bit PCM, 24kHz, mono, little-endian

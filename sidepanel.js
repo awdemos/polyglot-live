@@ -1180,7 +1180,7 @@ function renderSessionCost() {
   costBanner.classList.toggle("is-active", isActiveSession);
   const estimatedUsd = (Math.max(0, currentEstimatedCostMs) / 60000) * LIVE_TRANSLATE_ESTIMATED_COST_PER_MINUTE_USD;
   sessionCostValue.textContent = formatUsd(estimatedUsd);
-  sessionCostMeta.textContent = `(Free during "2.5 Live" model preview)`;
+  sessionCostMeta.textContent = `(Free during "Gemini 3.5 Live Translate" preview)`;
 }
 
 function appendTranscript(payload) {
