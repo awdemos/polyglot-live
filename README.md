@@ -2,7 +2,7 @@
 
 ## Demo
 
-[Watch the demo video](./demo/small-demo.mp4)
+[Watch the demo video on YouTube](https://youtu.be/X8DJ7oLaCfU)
 
 `polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation with:
 
