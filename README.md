@@ -1,5 +1,9 @@
 # polyglot-live
 
+## Demo
+
+[Watch the demo video](./demo/small-demo.mp4)
+
 `polyglot-live` is a Chrome Manifest V3 extension for real-time tab-audio translation with:
 
 - a side panel for controls and live status
