@@ -91,8 +91,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "STOP_REPLAY_RECORDING") {
     const tabId = resolveTabIdFromMessage(message, sender);
     forwardToOffscreen({ type: "OFFSCREEN_RECORD_STOP", tabId })
-      .then((payload) => {
+      .then(async (payload) => {
         updateReplayState(tabId, payload);
+        if (payload?.hasReplay && !payload?.isRecording) {
+          await cacheReplayArtifactsFromOffscreen(tabId, getSession(tabId), payload);
+        }
         sendResponse(payload);
       })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
@@ -461,30 +464,33 @@ async function captureReplaySnapshotBeforeStop(tabId, sessionState) {
   try {
     const replayState = await forwardToOffscreen({ type: "OFFSCREEN_RECORD_STATE", tabId });
     updateReplayState(tabId, replayState);
-
-    if (!replayState?.hasReplay || replayState?.isRecording) {
-      return;
-    }
-
-    const [previewPayload, exportPayload] = await Promise.all([
-      forwardToOffscreen({ type: "OFFSCREEN_RECORD_PREVIEW", tabId }).catch(() => null),
-      forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId }).catch(() => null)
-    ]);
-
-    if (previewPayload?.ok !== false) {
-      cacheReplayPreview(sessionState, previewPayload);
-    }
-
-    if (exportPayload?.ok !== false) {
-      cacheReplayExport(sessionState, exportPayload);
-    }
-
-    sessionState.replay.hasReplay = Boolean(
-      sessionState.replay.previewBytes?.length || sessionState.replay.exportBytes?.length || replayState?.hasReplay
-    );
+    await cacheReplayArtifactsFromOffscreen(tabId, sessionState, replayState);
   } catch (error) {
     console.warn("[polyglot-live/background] unable to preserve replay before stop", { tabId, error });
   }
+}
+
+async function cacheReplayArtifactsFromOffscreen(tabId, sessionState, replayState = null) {
+  if (!replayState?.hasReplay || replayState?.isRecording) {
+    return;
+  }
+
+  const [previewPayload, exportPayload] = await Promise.all([
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_PREVIEW", tabId }).catch(() => null),
+    forwardToOffscreen({ type: "OFFSCREEN_RECORD_EXPORT", tabId }).catch(() => null)
+  ]);
+
+  if (previewPayload?.ok !== false) {
+    cacheReplayPreview(sessionState, previewPayload);
+  }
+
+  if (exportPayload?.ok !== false) {
+    cacheReplayExport(sessionState, exportPayload);
+  }
+
+  sessionState.replay.hasReplay = Boolean(
+    sessionState.replay.previewBytes?.length || sessionState.replay.exportBytes?.length || replayState?.hasReplay
+  );
 }
 
 async function forwardToOffscreen(message) {
@@ -757,7 +763,9 @@ function updateReplayState(tabId, payload) {
   }
 
   const sessionState = getSession(tabId);
-  sessionState.replay.hasReplay = Boolean(payload?.hasReplay) || Boolean(sessionState.replay.previewBytes?.length);
+  sessionState.replay.hasReplay = Boolean(payload?.hasReplay) || Boolean(
+    sessionState.replay.previewBytes?.length || sessionState.replay.exportBytes?.length
+  );
   sessionState.replay.isRecording = Boolean(payload?.isRecording);
 }
 

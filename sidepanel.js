@@ -407,6 +407,27 @@ async function stopTranslation() {
   }
 
   setBusy(true);
+
+  if (replayIsRecording) {
+    updateRecordingMessage("Stopping replay recording before translation stops...");
+    const stopRecordingResponse = await chrome.runtime.sendMessage({ type: "STOP_REPLAY_RECORDING", tabId: currentTabId });
+    if (!stopRecordingResponse?.ok) {
+      setBusy(false);
+      updateStatus("error", stopRecordingResponse?.error ?? "Unable to stop replay recording.");
+      return;
+    }
+
+    replayIsRecording = false;
+    replayHasSavedCapture = Boolean(stopRecordingResponse?.hasReplay);
+    replayIsPlaying = false;
+    updateRecordingMessage(
+      replayHasSavedCapture
+        ? "Replay captured automatically as translation stopped."
+        : "Replay recording stopped, but no replay audio was captured."
+    );
+    syncRecordingButtonsForState();
+  }
+
   const response = await chrome.runtime.sendMessage({ type: "STOP_TRANSLATION", tabId: currentTabId });
   setBusy(false);
 
