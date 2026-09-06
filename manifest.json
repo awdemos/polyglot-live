@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "polyglot-live",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApwNOygmP0oISCYV67gjBziwKycSCqCUYFzcGyOybarXYMEKgNS1P/AiNz5hiAQz5iZKKC0AUON+RKSicC6MKS4zH+kMsl3RegZplYbPOA0M2MRmoagvzs/ER47qFYgcs8FHA+eA9vGpzaY1ivQJ8c6Tfjpj9STaDVi+VPHlM551vXzNYEWmyDzxg5OESvd4zReEu99UvjKqQpqXRKScvMJAARdqLCIbg2JWiOqMgt6v8r9Eu8kwTlrkChtKU/dmN/eUW2BTUmlipk7mKrnvkCKC9zwEE4CHFUrhHpetqPeBs1XtFkl/jeH7ok5nLSY9qUuaJpNxSNCCRQx5nljy84wIDAQAB",
   "description": "Real-time tab audio translation scaffold with a side panel and offscreen audio pipeline.",
   "permissions": [
     "activeTab",
@@ -40,6 +41,17 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.youtube.com/watch*"
+      ],
+      "js": [
+        "latin-dub-content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
   "web_accessible_resources": [
     {
       "resources": [

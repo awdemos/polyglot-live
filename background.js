@@ -63,6 +63,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "LATIN_DUB_START") {
+    startLatinDub(message.tabId)
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "LATIN_DUB_STOP") {
+    stopLatinDub()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "LATIN_DUB_CAPTION") {
+    broadcastLatinCaption(message, sender);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.type === "CLEAR_TRANSCRIPTS") {
     clearSessionTranscripts(resolveTabIdFromMessage(message, sender));
     sendResponse({ ok: true });
@@ -923,4 +943,41 @@ function getTotalEstimatedCostMs() {
   }
 
   return totalMs;
+}
+
+let activeLatinDubTabId = null;
+
+async function startLatinDub(tabId) {
+  if (!tabId) {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!activeTab?.id) {
+      throw new Error("No active tab found for Latin dub.");
+    }
+    tabId = activeTab.id;
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.url?.includes("youtube.com/watch")) {
+    throw new Error("Latin dub only works on YouTube watch pages.");
+  }
+
+  activeLatinDubTabId = tabId;
+  await chrome.tabs.sendMessage(tabId, { type: "LATIN_DUB_ENABLE" }).catch(() => {
+    throw new Error("Latin dub content script is not loaded. Try reloading the page.");
+  });
+
+  return { tabId };
+}
+
+async function stopLatinDub() {
+  if (activeLatinDubTabId) {
+    await chrome.tabs.sendMessage(activeLatinDubTabId, { type: "LATIN_DUB_DISABLE" }).catch(() => {});
+    activeLatinDubTabId = null;
+  }
+}
+
+function broadcastLatinCaption(message, sender) {
+  const payload = { type: "LATIN_DUB_CAPTION", text: message.text, url: message.url, tabId: sender?.tab?.id };
+  chrome.runtime.sendMessage(payload).catch(() => {});
+  console.info("[polyglot-live/background] latin caption", payload);
 }

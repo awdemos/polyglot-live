@@ -74,6 +74,37 @@
         </div>
       </details>
 
+      <details class="accordion card controls-accordion">
+        <summary class="accordion-summary">
+          <div class="accordion-summary-main">
+            <span>Latin Dub</span>
+            <span class="muted">YouTube captions → classical Latin speech</span>
+          </div>
+          <div class="accordion-summary-actions">
+            <button id="latinDubStartButton" type="button" class="summary-action-button">Start</button>
+            <button id="latinDubStopButton" type="button" class="summary-action-button secondary">Stop</button>
+          </div>
+        </summary>
+        <div class="accordion-body controls-body">
+          <p class="hint">
+            Works on YouTube watch pages where Latin auto-translated captions are enabled.
+            Captured captions are polished by Kimi 2.7 and spoken by espeak-ng classical Latin voice.
+          </p>
+          <label class="field">
+            <span>Latin dub server</span>
+            <input id="latinDubEndpoint" type="text" value="http://127.0.0.1:8788/speak" class="text-input">
+          </label>
+          <label class="field">
+            <span>Status</span>
+            <span id="latinDubStatus" class="status-value">Idle</span>
+          </label>
+          <audio id="latinDubAudio" controls style="width: 100%; margin-top: 8px;"></audio>
+          <section class="transcript-pane">
+            <pre id="latinDubTranscript">Latin transcript will appear here.</pre>
+          </section>
+        </div>
+      </details>
+
       <section class="card transcript-shell">
         <div class="status-head">
           <h2>Live Text</h2>
