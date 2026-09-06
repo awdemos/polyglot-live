@@ -1,74 +1,49 @@
-# polyglot-live — Agent Guide
+# polyglot-live
 
-## Overview
+## OVERVIEW
 
-A Chrome extension for real-time browser-tab or microphone audio translation.
-Uses the Chrome Manifest V3 extension model with a service worker, side panel,
-offscreen audio pipeline, and a small local token server.
+Chrome Manifest V3 extension for real-time tab-audio translation. It captures browser-tab or microphone audio in an offscreen document, streams it to Google's Gemini Live Translate WebSocket API, and plays translated audio back through the side panel.
 
-## Project Layout
+## STRUCTURE
 
-| File | Purpose |
-|------|---------|
-| `manifest.json` | Chrome extension manifest (MV3) |
-| `background.js` | Service worker: tab capture, offscreen lifecycle, API routing |
-| `sidepanel.html` / `sidepanel.js` | Side-panel UI (transcripts, controls) |
-| `offscreen.html` / `offscreen.js` | Offscreen document for audio capture/processing |
-| `mic-permission.html` / `mic-permission.js` | Microphone permission helper |
-| `config.js` | Shared configuration / prompt templates |
-| `latin-dub-content.js` | Latin-dub specific content rules |
-| `demo/` | Demo assets |
-| `INSTALL_FROM_ZIP.md` | Manual installation guide for testers |
-
-## Install / Test
-
-### Local unpacked install
-
-```bash
-# 1. Start the local token server (see INSTALL_FROM_ZIP.md for server path)
-# 2. Open chrome://extensions
-# 3. Enable Developer mode
-# 4. Load unpacked → select this directory
-# 5. Pin the extension and open the side panel
+```
+manifest.json              Chrome extension manifest
+background.js              Service worker / orchestration
+sidepanel.html / sidepanel.js / sidepanel.css   Side panel UI
+offscreen.html / offscreen.js / offscreen-audio-processor.js   Offscreen audio capture & playback
+config.js                  Supported languages, model defaults, constants
+server/token-server.mjs    Local Node server that mints Gemini ephemeral tokens
+server/latin-dub.mjs       Latin-dub content-script helper (experimental)
+latin-dub-content.js      YouTube content script injection
+mic-permission.html/js     Microphone permission shim
+demo/                      Demo video assets
 ```
 
-### Lint / sanity
+## COMMANDS
 
 ```bash
-# There is no build step; validate the manifest JSON
-python3 -m json.tool manifest.json > /dev/null
-
-# Optional: run a JS linter if available
-npx eslint background.js sidepanel.js offscreen.js config.js || true
+node -c manifest.json       # Verify JSON is valid
+node -c background.js     # Syntax-check service worker
+node -c sidepanel.js      # Syntax-check side panel
+node -c offscreen.js      # Syntax-check offscreen document
+node -c server/token-server.mjs  # Syntax-check token server
+node server/token-server.mjs     # Start local token server (requires GEMINI_API_KEY)
 ```
 
-## Key Conventions
+## SETUP
 
-- **Manifest V3**: service worker background, no persistent page.
-- **Offscreen API**: audio capture runs in an offscreen document because service
-  workers cannot use `navigator.mediaDevices`.
-- **Side panel**: declared in manifest; default path is `sidepanel.html`.
-- **Host permissions**: includes `generativelanguage.googleapis.com` for Gemini
-  Live Translate and `localhost` for the token server.
-- **No build tooling**: plain JavaScript; edit files directly.
+- Requires Node.js.
+- Install the extension as an unpacked Chrome extension (`chrome://extensions` → Developer mode → Load unpacked → select this folder).
+- Set `GEMINI_API_KEY` and run `node server/token-server.mjs`.
+- In the side panel, confirm the token URL (`http://127.0.0.1:8787/token`), enter the shared secret if configured, and click `Check readiness`.
+- Select input source (`Tab audio` or `Microphone`) and a target language, then start.
 
-## Common Gotchas
+## CODE STYLE
 
-- Chrome internal pages (`chrome://`) cannot be captured for tab audio.
-- The extension needs a running local token server; it will not work standalone.
-- Extension ID is pinned by the embedded `key` field in `manifest.json`.
-- Load as unpacked in a regular Chrome profile, not an enterprise-managed one,
-  unless the extension is force-installed.
+- Vanilla JavaScript, ES modules in the service worker (`"type": "module"`).
+- Keep manifest permissions minimal; new host permissions require extension reload.
+- Audio format contract with Gemini: raw 16-bit PCM, 16 kHz mono input; 24 kHz mono output.
 
-## Deployment
+## DEPLOYMENT
 
-Package as a `.zip` for sideloading:
-
-```bash
-zip -r polyglot-live.zip \
-  manifest.json background.js sidepanel.html sidepanel.js \
-  offscreen.html offscreen.js config.js latin-dub-content.js \
-  mic-permission.html mic-permission.js icons/ demo/
-```
-
-Store publication is not configured; distribute the ZIP for local testing.
+No Dagger module or recognized deployment configuration was found. This is a local-developer / tester build loaded via Chrome's unpacked-extension flow; it is not published on the Chrome Web Store.
