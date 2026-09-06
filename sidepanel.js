@@ -84,6 +84,12 @@ const metricsConcernsList = document.querySelector("#metricsConcernsList");
 const metricsActionsList = document.querySelector("#metricsActionsList");
 const clearTranscriptButton = document.querySelector("#clearTranscriptButton");
 const saveTranscriptButton = document.querySelector("#saveTranscriptButton");
+const latinDubStartButton = document.querySelector("#latinDubStartButton");
+const latinDubStopButton = document.querySelector("#latinDubStopButton");
+const latinDubEndpoint = document.querySelector("#latinDubEndpoint");
+const latinDubStatus = document.querySelector("#latinDubStatus");
+const latinDubAudio = document.querySelector("#latinDubAudio");
+const latinDubTranscript = document.querySelector("#latinDubTranscript");
 const tokenEndpointInput = document.querySelector("#tokenEndpoint");
 const tokenSecretInput = document.querySelector("#tokenSecret");
 const checkAuthButton = document.querySelector("#checkAuthButton");
@@ -146,6 +152,9 @@ let metricsIsWorking = false;
 let activeWorkflowTab = "live";
 let demoCycleActive = false;
 let demoCycleToken = 0;
+let latinDubActive = false;
+let latinDubPendingText = null;
+let latinDubAudioLocked = false;
 const ENABLE_WORD_HIGHLIGHTING = false;
 const DEFAULT_THEME = "light";
 const DEMO_LANGUAGE_AUDIO_TARGET_MS = 60000;
@@ -167,6 +176,22 @@ themeToggleButton.addEventListener("click", async () => {
 
 grantMicrophoneAccessButton.addEventListener("click", async () => {
   await requestMicrophoneAccess();
+});
+
+latinDubStartButton.addEventListener("click", async () => {
+  await startLatinDub();
+});
+
+latinDubStopButton.addEventListener("click", async () => {
+  await stopLatinDub();
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "LATIN_DUB_CAPTION") {
+    handleLatinDubCaption(message.text);
+    return false;
+  }
+  return false;
 });
 
 saveTranscriptButton.addEventListener("click", () => {
@@ -3082,3 +3107,88 @@ function getLanguageLabelFromCode(code) {
 
   return code;
 }
+
+async function startLatinDub() {
+  latinDubActive = true;
+  latinDubPendingText = null;
+  latinDubAudioLocked = false;
+  latinDubStatus.textContent = "Starting...";
+  latinDubTranscript.textContent = "Latin transcript will appear here.";
+
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const response = await chrome.runtime.sendMessage({ type: "LATIN_DUB_START", tabId: activeTab?.id });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Failed to start Latin dub.");
+    }
+    latinDubStatus.textContent = "Active — listening for captions";
+  } catch (error) {
+    latinDubActive = false;
+    latinDubStatus.textContent = `Error: ${error.message}`;
+    console.error("[polyglot-live/sidepanel] Latin dub start failed", error);
+  }
+}
+
+async function stopLatinDub() {
+  latinDubActive = false;
+  latinDubPendingText = null;
+  latinDubAudioLocked = false;
+  latinDubStatus.textContent = "Stopped";
+  await chrome.runtime.sendMessage({ type: "LATIN_DUB_STOP" }).catch(() => {});
+}
+
+function handleLatinDubCaption(text) {
+  if (!latinDubActive || !text) return;
+
+  latinDubPendingText = text;
+  latinDubTranscript.textContent = text;
+
+  if (!latinDubAudioLocked) {
+    void speakLatinText(text);
+  }
+}
+
+async function speakLatinText(text) {
+  if (!text || latinDubAudioLocked) return;
+  latinDubAudioLocked = true;
+
+  try {
+    const endpoint = latinDubEndpoint.value || "http://127.0.0.1:8788/speak";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, polish: true })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server returned ${response.status}`);
+    }
+
+    const polished = decodeURIComponent(response.headers.get("x-latin-text") || text);
+    latinDubTranscript.textContent = polished;
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+
+    if (latinDubAudio.src) {
+      URL.revokeObjectURL(latinDubAudio.src);
+    }
+    latinDubAudio.src = url;
+    await latinDubAudio.play();
+  } catch (error) {
+    console.error("[polyglot-live/sidepanel] Latin TTS failed", error);
+    latinDubStatus.textContent = `TTS error: ${error.message}`;
+  } finally {
+    latinDubAudioLocked = false;
+    if (latinDubActive && latinDubPendingText && latinDubPendingText !== text) {
+      void speakLatinText(latinDubPendingText);
+    }
+  }
+}
+
+latinDubAudio.addEventListener("ended", () => {
+  latinDubAudioLocked = false;
+  if (latinDubActive && latinDubPendingText) {
+    void speakLatinText(latinDubPendingText);
+  }
+});
